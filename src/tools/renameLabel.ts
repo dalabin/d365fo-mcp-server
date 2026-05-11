@@ -86,6 +86,11 @@ function escapeRegex(s: string): string {
  * Returns the new file content, or null if the label was not found.
  */
 function renameLabelInTxt(content: string, oldId: string, newId: string): string | null {
+  // Preserve the original line-ending style — D365FO .label.txt files are CRLF
+  // in TFVC/Git, and silently rewriting them as LF makes every line look modified.
+  const eol: '\r\n' | '\n' = content.includes('\r\n')
+    ? '\r\n'
+    : (content.includes('\n') ? '\n' : '\r\n');
   const lines = stripBom(content).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
   let found = false;
   const out: string[] = [];
@@ -104,7 +109,7 @@ function renameLabelInTxt(content: string, oldId: string, newId: string): string
   }
 
   if (!found) return null;
-  return UTF8_BOM + out.join('\n');
+  return UTF8_BOM + out.join(eol);
 }
 
 /**

@@ -694,6 +694,97 @@ describe('create_label', () => {
       else process.env.LABEL_SORT_ORDER = origEnv;
     }
   });
+
+  it('preserves CRLF line endings when the original file uses CRLF', async () => {
+    const fsMock = await import('fs');
+    const writeCalls: string[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (_p: string, content: string) => {
+      writeCalls.push(content);
+    });
+    (fsMock.promises.readdir as any).mockResolvedValueOnce(['en-US']);
+    // Existing file uses CRLF (Windows / TFVC default for D365FO label files)
+    (fsMock.promises.readFile as any).mockResolvedValueOnce(
+      '﻿AppleLabel=Apple text\r\nZebraLabel=Zebra text\r\n',
+    );
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'MiddleLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Middle text' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.includes('MiddleLabel='));
+    expect(labelWrite).toBeDefined();
+    // The written file MUST keep CRLF — switching to LF makes every line look modified in VCS diffs.
+    expect(labelWrite).toContain('\r\n');
+    expect(labelWrite).toContain('AppleLabel=Apple text\r\n');
+    expect(labelWrite).toContain('MiddleLabel=Middle text\r\n');
+    // And it must not introduce bare LF (i.e. every LF should be preceded by CR)
+    const bareLfMatches = labelWrite!.match(/(?<!\r)\n/g);
+    expect(bareLfMatches).toBeNull();
+  });
+
+  it('preserves LF line endings when the original file uses LF', async () => {
+    const fsMock = await import('fs');
+    const writeCalls: string[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (_p: string, content: string) => {
+      writeCalls.push(content);
+    });
+    (fsMock.promises.readdir as any).mockResolvedValueOnce(['en-US']);
+    (fsMock.promises.readFile as any).mockResolvedValueOnce(
+      '﻿AppleLabel=Apple text\nZebraLabel=Zebra text\n',
+    );
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'MiddleLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Middle text' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.includes('MiddleLabel='));
+    expect(labelWrite).toBeDefined();
+    expect(labelWrite).not.toContain('\r\n');
+    expect(labelWrite).toContain('MiddleLabel=Middle text\n');
+  });
+
+  it('defaults to CRLF for a brand-new label file (no existing content)', async () => {
+    const fsMock = await import('fs');
+    const writeCalls: Array<{ path: string; content: string }> = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writeCalls.push({ path: p, content });
+    });
+    // No existing language folders — triggers the createLabelFileIfMissing path
+    (fsMock.promises.readdir as any).mockResolvedValueOnce([]);
+    // readFile is never called when the file is brand-new; if it is, return empty
+    (fsMock.promises.readFile as any).mockResolvedValue('');
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'BrandNew',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Brand new label' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.content.includes('BrandNew='));
+    expect(labelWrite).toBeDefined();
+    // New D365FO label files default to CRLF (Windows-native, matches TFVC defaults)
+    expect(labelWrite!.content).toContain('BrandNew=Brand new label\r\n');
+  });
 });
 
 // ─── rename_label ────────────────────────────────────────────────────────────
@@ -746,5 +837,46 @@ describe('rename_label', () => {
   it('returns error when required fields are missing', async () => {
     const result = await renameLabelTool(req('rename_label', { oldLabelId: 'Foo' }), ctx);
     expect(result.isError).toBe(true);
+  });
+
+  it('preserves CRLF line endings when renaming inside a CRLF .label.txt', async () => {
+    const fsMock = await import('fs');
+    const writeCalls: Array<{ path: string; content: string }> = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writeCalls.push({ path: p, content });
+    });
+    // First readdir call returns the language list; later collectFiles calls fall
+    // back to the default [] mock so the subsequent .xpp/.xml scan finds nothing.
+    (fsMock.promises.readdir as any).mockResolvedValueOnce(['en-US']);
+    // CRLF source file with the label to rename plus a couple of siblings.
+    // The rename tool reads the file three times (existence check, duplicate
+    // check, and the actual rewrite), so use mockResolvedValue.
+    (fsMock.promises.readFile as any).mockResolvedValue(
+      '﻿AppleLabel=Apple text\r\nOldFeatureName=Some text\r\nZebraLabel=Zebra text\r\n',
+    );
+
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ labelId: 'OldFeatureName' }),
+    ]);
+
+    const result = await renameLabelTool(
+      req('rename_label', {
+        oldLabelId: 'OldFeatureName',
+        newLabelId: 'NewFeatureName',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+      }),
+      ctx,
+    );
+    if (result.isError) throw new Error(`rename_label failed: ${result.content[0].text}`);
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.path.endsWith('.label.txt'));
+    expect(labelWrite).toBeDefined();
+    // Renamed line must use CRLF, and surrounding lines must not be silently downgraded to LF
+    expect(labelWrite!.content).toContain('NewFeatureName=Some text\r\n');
+    expect(labelWrite!.content).toContain('AppleLabel=Apple text\r\n');
+    const bareLfMatches = labelWrite!.content.match(/(?<!\r)\n/g);
+    expect(bareLfMatches).toBeNull();
   });
 });
