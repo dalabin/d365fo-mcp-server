@@ -15,6 +15,7 @@ import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../utils
 import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
 import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject } from '../bridge/index.js';
 import { invalidateCache } from './updateSymbolIndex.js';
+import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
 /**
  * Per-project-file mutex to serialise concurrent addToProject calls.
@@ -3876,11 +3877,9 @@ export async function handleCreateD365File(
       `[create_d365fo_file] XML preview: ${xmlContent.substring(0, 200)}...`
     );
 
-    // Write file with UTF-8 BOM (required for D365FO XML files)
+    // Write file matching D365FO convention: no BOM, CRLF, no trailing newline
     try {
-      const utf8BOM = Buffer.from([0xEF, 0xBB, 0xBF]);
-      const xmlBuffer = Buffer.concat([utf8BOM, Buffer.from(xmlContent, 'utf-8')]);
-      await fs.writeFile(normalizedFullPath, xmlBuffer);
+      await fs.writeFile(normalizedFullPath, normalizeD365Xml(xmlContent), 'utf-8');
     } catch (writeError) {
       console.error(`[create_d365fo_file] Failed to write file:`, writeError);
       

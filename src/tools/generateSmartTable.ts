@@ -14,6 +14,7 @@ import { getConfigManager } from '../utils/configManager.js';
 import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix } from '../utils/modelClassifier.js';
 import { ProjectFileManager } from './createD365File.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
+import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
 interface GenerateSmartTableArgs {
   name: string;
@@ -905,7 +906,7 @@ export async function handleGenerateSmartTable(
   }
 
   // Write file
-  fs.writeFileSync(normalizedPath, xml, 'utf-8');
+  fs.writeFileSync(normalizedPath, normalizeD365Xml(xml), 'utf-8');
   console.log(`[generateSmartTable] Created file: ${normalizedPath}`);
 
   // Add to Visual Studio project if a projectPath is known

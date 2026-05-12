@@ -28,6 +28,7 @@ import {
 } from '../bridge/index.js';
 import { invalidateCache } from './updateSymbolIndex.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
+import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
 /**
  * Decode the standard XML entities (&lt;, &gt;, &apos;, &quot;, &amp;) and normalise
@@ -78,19 +79,23 @@ async function directXmlReplaceCode(
   newCode: string,
 ): Promise<{ success: boolean; message: string } | null> {
   try {
-    // Read as Buffer to detect and preserve UTF-8 BOM (D365FO XML files use BOM)
-    const buf = await fs.readFile(filePath);
-    const hasBom = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF;
-    const content = buf.toString('utf-8');
+    // D365FO XML files on disk are CRLF, but oldCode passed by the AI is typically
+    // copied from get_method / get_class_info output that already strips CRs.
+    // Normalize both sides to LF for matching, then let normalizeD365Xml put the
+    // file back into D365FO's canonical shape (no BOM, CRLF, no trailing newline).
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+    const normOld = oldCode.replace(/\r\n/g, '\n');
+    const normNew = newCode.replace(/\r\n/g, '\n');
 
-    if (!content.includes(oldCode)) {
+    if (!content.includes(normOld)) {
       return null; // oldCode not found in file at all
     }
 
     // Ensure there is exactly one occurrence so we replace the correct block.
     // String.prototype.replace() without /g only replaces the FIRST occurrence,
     // which would silently leave other occurrences and produce ambiguous results.
-    const occurrences = content.split(oldCode).length - 1;
+    const occurrences = content.split(normOld).length - 1;
     if (occurrences > 1) {
       return {
         success: false,
@@ -98,15 +103,12 @@ async function directXmlReplaceCode(
       };
     }
 
-    const updated = content.replace(oldCode, newCode);
+    const updated = content.replace(normOld, normNew);
     if (updated === content) {
       return null; // no change made
     }
 
-    // Preserve BOM if it was present: Node's utf-8 encoding strips BOM on read
-    // but '\uFEFF' prefix restores it on write.
-    const bomPrefix = hasBom && !updated.startsWith('\uFEFF') ? '\uFEFF' : '';
-    await fs.writeFile(filePath, bomPrefix + updated, 'utf-8');
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
     console.error(`[modify_d365fo_file] ✅ directXmlReplaceCode fallback: replaced in ${filePath}`);
     return {
       success: true,

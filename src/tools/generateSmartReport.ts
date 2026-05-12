@@ -31,6 +31,7 @@ import fs from 'fs';
 import { getConfigManager } from '../utils/configManager.js';
 import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix } from '../utils/modelClassifier.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
+import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -1076,13 +1077,7 @@ export async function handleGenerateSmartReport(
       continue;
     }
 
-    // Reports need UTF-8 BOM
-    if (obj.objectType === 'report') {
-      const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
-      fs.writeFileSync(normalizedPath, Buffer.concat([bom, Buffer.from(obj.content, 'utf-8')]));
-    } else {
-      fs.writeFileSync(normalizedPath, obj.content, 'utf-8');
-    }
+    fs.writeFileSync(normalizedPath, normalizeD365Xml(obj.content), 'utf-8');
 
     let projectMsg = '';
     if (effectiveProjectPath) {
