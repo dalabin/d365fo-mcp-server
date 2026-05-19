@@ -58,13 +58,14 @@ vi.mock('../../src/utils/operationLocks.js', () => ({
   forceReleaseLock: vi.fn().mockResolvedValue(undefined),
 }));
 
+import path from 'path';
 import { buildProjectTool } from '../../src/tools/buildProject';
 
 const PROJECT_PATH = 'C:\\MyProject\\MyProject.rnrproj';
 const MODEL_NAME = 'MyModel';
 const RNRPROJ_XML = `<Project><Model>${MODEL_NAME}</Model></Project>`;
 const PKG = 'C:\\AOSService\\PackagesLocalDirectory';
-const XPPC = `${PKG}\\bin\\xppc.exe`;
+const XPPC = path.join(PKG, 'bin', 'xppc.exe');
 
 function makeFakeChild(pid = 12345) {
   const child: any = {
@@ -263,7 +264,7 @@ describe('build_d365fo_project', () => {
   it('passes -metadata and -compilermetadata args to xppc.exe', async () => {
     const CUSTOM = 'C:\\Repos\\MyCode\\Metadata';
     const MSFT = 'C:\\AOSService\\PackagesLocalDirectory';
-    const xppc = `${MSFT}\\bin\\xppc.exe`;
+    const xppc = path.join(MSFT, 'bin', 'xppc.exe');
 
     cfgGetCustomPackagesPath.mockResolvedValue(CUSTOM);
     cfgGetMicrosoftPackagesPath.mockResolvedValue(MSFT);
