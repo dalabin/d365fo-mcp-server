@@ -663,36 +663,25 @@ class ConfigManager {
    * already provides enough workspace context to work without calling `roots/list`.
    *
    * In instanced mode every project has its own dedicated server instance whose
-   * config file contains both a model name and at least one path. Calling
-   * `roots/list` in this situation is unnecessary and causes a -32001 timeout when
-   * `mcp-remote` is the transport (it has a hard-coded 60 s request timeout and
-   * cannot complete a server-initiated request over HTTP).
+   * config contains both a model name and at least one path. Calling `roots/list`
+   * is then unnecessary and causes a -32001 timeout when `mcp-remote` is the
+   * transport (it has a hard-coded 60 s request timeout and cannot complete a
+   * server-initiated request over HTTP). In instanced mode the workspace is also
+   * immutable per instance, so `roots_list_changed` notifications are irrelevant.
    *
    * Awaits `ensureLoaded()` so it is safe to call before the first tool invocation.
    */
   async isStaticallyConfigured(): Promise<boolean> {
     await this.ensureLoaded();
-
-    const fileContext = this.config?.context || this.config?.servers?.context;
-
-    const hasModelName = !!(
-      fileContext?.modelName ||
-      process.env.D365FO_MODEL_NAME
-    );
-
+    const ctx = this.getContext();
+    const hasModelName = !!ctx?.modelName;
     const hasPath = !!(
-      fileContext?.workspacePath       ||
-      fileContext?.packagePath         ||
-      fileContext?.customPackagesPath  ||
-      fileContext?.projectPath         ||
-      fileContext?.solutionPath        ||
-      process.env.D365FO_WORKSPACE_PATH          ||
-      process.env.D365FO_PACKAGE_PATH            ||
-      process.env.D365FO_CUSTOM_PACKAGES_PATH    ||
-      process.env.D365FO_PROJECT_PATH            ||
-      process.env.D365FO_SOLUTION_PATH
+      ctx?.workspacePath ||
+      ctx?.packagePath   ||
+      ctx?.customPackagesPath ||
+      ctx?.projectPath   ||
+      ctx?.solutionPath
     );
-
     return hasModelName && hasPath;
   }
 
