@@ -4,8 +4,9 @@
  *         validate_object_naming, verify_d365fo_project
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { validateObjectNamingTool } from '../../src/tools/validateObjectNaming';
+import { getExtensionNamingStyle } from '../../src/utils/modelClassifier';
 import { verifyD365ProjectTool } from '../../src/tools/verifyD365Project';
 import { handleCreateD365File } from '../../src/tools/createD365File';
 import { modifyD365FileTool } from '../../src/tools/modifyD365File';
@@ -224,6 +225,91 @@ describe('validate_object_naming', () => {
       );
       expect(result.isError).toBeFalsy();
     }
+  });
+});
+
+// ─── validate_object_naming — EXTENSION_NAMING_STYLE=model-name ───────────────
+// Under the model-name style the extension token is the MODEL NAME (VS default),
+// not the prefix infix. The validator must accept Base_ModelName_Extension /
+// Base.ModelName and must NOT demand the prefix infix or a "…Extension" element token.
+describe('validate_object_naming — model-name style', () => {
+  let ctx: XppServerContext;
+
+  beforeEach(() => {
+    ctx = buildContext();
+    (ctx.symbolIndex.db as any).stmt.get.mockReturnValue(undefined);
+    (ctx.symbolIndex.db as any).stmt.all.mockReturnValue([]);
+    vi.mocked(getExtensionNamingStyle).mockReturnValue('model-name');
+  });
+
+  afterEach(() => {
+    vi.mocked(getExtensionNamingStyle).mockReturnValue('prefix');
+  });
+
+  it('accepts a model-name class extension without errors', async () => {
+    const result = await validateObjectNamingTool(
+      req('validate_object_naming', {
+        proposedName: 'CustTable_ContosoRobotics_Extension',
+        objectType: 'class-extension',
+        baseObjectName: 'CustTable',
+        modelName: 'ContosoRobotics',
+        modelPrefix: 'CR',
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    // The model-name token is correct → no prefix-infix warning, no errors.
+    expect(result.content[0].text).not.toMatch(/ERRORS \(\d/);
+    expect(result.content[0].text).not.toMatch(/does not include model prefix/);
+    expect(result.content[0].text).toMatch(/Extension Style: model-name/);
+  });
+
+  it('warns when a class extension uses the prefix infix instead of the model name', async () => {
+    const result = await validateObjectNamingTool(
+      req('validate_object_naming', {
+        proposedName: 'CustTableCR_Extension',
+        objectType: 'class-extension',
+        baseObjectName: 'CustTable',
+        modelName: 'ContosoRobotics',
+        modelPrefix: 'CR',
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/does not embed the model name "ContosoRobotics"/);
+    expect(result.content[0].text).toMatch(/CustTable_ContosoRobotics_Extension/);
+  });
+
+  it('accepts a model-name element extension (Base.ModelName, no "Extension" word)', async () => {
+    const result = await validateObjectNamingTool(
+      req('validate_object_naming', {
+        proposedName: 'CustTable.ContosoRobotics',
+        objectType: 'table-extension',
+        baseObjectName: 'CustTable',
+        modelName: 'ContosoRobotics',
+        modelPrefix: 'CR',
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toMatch(/ERRORS \(\d/);
+    // Must NOT demand a "…Extension" suffix under model-name style.
+    expect(result.content[0].text).not.toMatch(/must end with 'Extension'/);
+  });
+
+  it('warns when an element extension uses the prefix token instead of the model name', async () => {
+    const result = await validateObjectNamingTool(
+      req('validate_object_naming', {
+        proposedName: 'CustTable.CRExtension',
+        objectType: 'table-extension',
+        baseObjectName: 'CustTable',
+        modelName: 'ContosoRobotics',
+        modelPrefix: 'CR',
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/should be the model name "ContosoRobotics"/);
   });
 });
 

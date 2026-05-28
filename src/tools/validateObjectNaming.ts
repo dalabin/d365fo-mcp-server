@@ -7,7 +7,8 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
-import { getObjectSuffix } from '../utils/modelClassifier.js';
+import { getObjectSuffix, getExtensionNamingStyle } from '../utils/modelClassifier.js';
+import { getConfigManager } from '../utils/configManager.js';
 
 const ValidateObjectNamingArgsSchema = z.object({
   proposedName: z.string().describe('The proposed object name to validate'),
@@ -22,6 +23,8 @@ const ValidateObjectNamingArgsSchema = z.object({
     .describe('Required for extension types: name of the object being extended'),
   modelPrefix: z.string().optional()
     .describe('Expected ISV/model prefix (2-4 uppercase letters, e.g. "WHS", "CONT"). Auto-detected if omitted.'),
+  modelName: z.string().optional()
+    .describe('Target model name. Only relevant when EXTENSION_NAMING_STYLE=model-name, where the extension token is the model name (e.g. CustTable_ContosoRobotics_Extension). Auto-detected from the active workspace if omitted.'),
 });
 
 // Extension types that require base object name
@@ -64,6 +67,19 @@ export async function validateObjectNamingTool(request: CallToolRequest, context
       }
     }
 
+    // ── Resolve extension-naming style and (for model-name style) the model name ──
+    // Under EXTENSION_NAMING_STYLE=model-name the extension token is the MODEL NAME
+    // (Visual Studio developer-tools default), not the prefix infix:
+    //   class extension   → {Base}_{ModelName}_Extension
+    //   element extension → {Base}.{ModelName}
+    // Explicit modelName arg wins; otherwise resolve from the active workspace config.
+    const namingStyle = getExtensionNamingStyle();
+    let modelName = args.modelName?.trim() || '';
+    if (!modelName && namingStyle === 'model-name') {
+      modelName = getConfigManager().getModelName() ?? '';
+    }
+    const useModelName = namingStyle === 'model-name' && !!modelName;
+
     // ══════════════════════════════════════════════════════════════════
     // RULE SET 1: Extension naming rules
     // ══════════════════════════════════════════════════════════════════
@@ -74,30 +90,63 @@ export async function validateObjectNamingTool(request: CallToolRequest, context
         errors.push(`baseObjectName is required for extension types (${args.objectType}).`);
       } else {
         if (args.objectType === 'class-extension') {
-          // Class extensions: {Base}{Prefix}_Extension
-          const expectedPattern = `${baseObjectName}${prefix}_Extension`;
+          // Class extensions:
+          //   prefix style     → {Base}{Prefix}_Extension
+          //   model-name style → {Base}_{ModelName}_Extension
+          const expectedPattern = useModelName
+            ? `${baseObjectName}_${modelName}_Extension`
+            : `${baseObjectName}${prefix}_Extension`;
+          const expectedToken = useModelName ? modelName : prefix;
 
           if (!name.startsWith(baseObjectName)) {
             errors.push(`Class extension names must start with the base class name.\n  Expected format: ${expectedPattern}`);
-            if (prefix) suggestions.push(`Correct name: ${expectedPattern}`);
+            if (expectedToken) suggestions.push(`Correct name: ${expectedPattern}`);
           } else if (!name.endsWith('_Extension')) {
             errors.push(`Class extension names must end with '_Extension'.\n  Expected format: ${expectedPattern}`);
-            if (prefix) suggestions.push(`Correct name: ${expectedPattern}`);
+            if (expectedToken) suggestions.push(`Correct name: ${expectedPattern}`);
           } else {
-            // Has correct structure — check prefix is included
-            const middle = name.slice(baseObjectName.length, -'_Extension'.length);
-            if (prefix && middle !== prefix && !middle.includes(prefix)) {
-              warnings.push(`Extension name does not include model prefix "${prefix}".\n  Current: ${name}\n  Recommended: ${expectedPattern}`);
+            // Has correct structure — check the expected token is included.
+            // Strip a leading separator so "_ContosoRobotics" compares cleanly to the model name.
+            const middle = name.slice(baseObjectName.length, -'_Extension'.length).replace(/^_+/, '');
+            if (expectedToken &&
+                middle.toLowerCase() !== expectedToken.toLowerCase() &&
+                !middle.toLowerCase().includes(expectedToken.toLowerCase())) {
+              warnings.push(
+                useModelName
+                  ? `Extension name does not embed the model name "${modelName}" (EXTENSION_NAMING_STYLE=model-name).\n  Current: ${name}\n  Recommended: ${expectedPattern}`
+                  : `Extension name does not include model prefix "${prefix}".\n  Current: ${name}\n  Recommended: ${expectedPattern}`
+              );
             }
           }
 
-          // AOT extension name suggestion
-          if (args.objectType === 'class-extension') {
-            suggestions.push(`AOT label for extension file: ${baseObjectName}.${prefix}Extension (if creating table-extension AOT object instead)`);
+          // AOT element-extension name suggestion (if an element extension is meant instead)
+          suggestions.push(
+            useModelName
+              ? `AOT name for an element extension instead: ${baseObjectName}.${modelName}`
+              : `AOT label for extension file: ${baseObjectName}.${prefix}Extension (if creating table-extension AOT object instead)`
+          );
+
+        } else if (useModelName) {
+          // AOT extensions (table/form/enum/edt), model-name style: {Base}.{ModelName}
+          // Visual Studio names these with the bare model name and NO "Extension" word.
+          const expectedPattern = `${baseObjectName}.${modelName}`;
+
+          if (!name.includes('.')) {
+            errors.push(`${args.objectType} names must use dot notation: {Base}.{ModelName}.\n  Expected: ${expectedPattern}`);
+            suggestions.push(`Correct name: ${expectedPattern}`);
+          } else {
+            const [basePart, extPart] = name.split('.', 2);
+
+            if (basePart !== baseObjectName) {
+              errors.push(`Extension base (before '.') must exactly match baseObjectName.\n  Expected: ${baseObjectName}.xxx\n  Got: ${basePart}.xxx`);
+            }
+            if (extPart.toLowerCase() !== modelName.toLowerCase()) {
+              warnings.push(`Extension token (after '.') should be the model name "${modelName}" (EXTENSION_NAMING_STYLE=model-name).\n  Current: ${extPart}\n  Recommended: ${modelName}`);
+            }
           }
 
         } else {
-          // AOT extensions (table/form/enum/edt): {Base}.{Prefix}Extension
+          // AOT extensions (table/form/enum/edt), prefix style: {Base}.{Prefix}Extension
           const expectedPattern = `${baseObjectName}.${prefix}Extension`;
 
           if (!name.includes('.')) {
@@ -221,6 +270,14 @@ export async function validateObjectNamingTool(request: CallToolRequest, context
     let output = `Validation: "${name}" as ${args.objectType}\n`;
     if (args.baseObjectName) output += `Base Object: ${args.baseObjectName}\n`;
     if (prefix) output += `Model Prefix: ${prefix}\n`;
+    if (isExtension) {
+      output += useModelName
+        ? `Extension Style: model-name (token = model name "${modelName}")\n`
+        : `Extension Style: prefix (token = model prefix infix)\n`;
+      if (namingStyle === 'model-name' && !modelName) {
+        output += `  ⚠ EXTENSION_NAMING_STYLE=model-name but no model name could be resolved — validated structure only. Pass modelName to validate the extension token.\n`;
+      }
+    }
     output += '\n';
 
     if (errors.length > 0) {
