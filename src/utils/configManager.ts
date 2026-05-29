@@ -9,7 +9,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { autoDetectD365Project, detectD365Project, scanAllD365Projects, extractModelNameFromProject, detectGitBranch, isMicrosoftDemoModel, type D365ProjectInfo } from './workspaceDetector.js';
-import { registerCustomModel } from './modelClassifier.js';
+import { registerCustomModel, getCustomModels } from './modelClassifier.js';
 import { XppConfigProvider, type XppEnvironmentConfig } from './xppConfigProvider.js';
 
 export interface McpContext {
@@ -53,6 +53,9 @@ class ConfigManager {
   private config: McpConfig | null = null;
   private configPath: string;
   private runtimeContext: Partial<McpContext> = {};
+  // Guards the one-time registration of explicitly-configured custom models
+  // (the resolved target model + any CUSTOM_MODELS entries) performed in ensureLoaded().
+  private configuredModelsRegistered = false;
   /**
    * Per-request context storage — isolates each HTTP request's workspace path
    * from concurrent requests. Populated via runWithRequestContext() in transport.ts.
@@ -595,6 +598,30 @@ class ConfigManager {
    */
   async ensureLoaded(): Promise<void> {
     await this.load();
+
+    // Register the explicitly-configured custom models exactly once. The target
+    // model resolved from configuration (D365FO_MODEL_NAME env var or a modelName
+    // key in .mcp.json) is custom by definition, as are any CUSTOM_MODELS entries.
+    // Registering them here makes isCustomModel() deterministic regardless of call
+    // ordering — without it, a long model name whose ISV prefix is only an
+    // abbreviation (e.g. prefix "CR" for "ContosoRobotics") is misclassified as a
+    // Microsoft standard model until some later operation happens to register it.
+    if (!this.configuredModelsRegistered) {
+      this.configuredModelsRegistered = true;
+
+      const configuredModel = this.getContext()?.modelName?.trim();
+      if (configuredModel) {
+        registerCustomModel(configuredModel);
+      }
+
+      // CUSTOM_MODELS literals (wildcard patterns are matched directly by
+      // isCustomModel, so they don't need to be registered as exact names).
+      for (const entry of getCustomModels()) {
+        if (!entry.includes('*')) {
+          registerCustomModel(entry);
+        }
+      }
+    }
   }
 
   /**
@@ -841,7 +868,24 @@ class ConfigManager {
     const context = this.getContext();
 
     if (context?.modelName) {
-      return { modelName: context.modelName, source: '.mcp.json' };
+      // getContext() merges three sources with precedence runtime > env var > file.
+      // Report the one that actually produced the value, so the diagnostics don't
+      // send the developer looking in .mcp.json for a value that came from the
+      // D365FO_MODEL_NAME environment variable.
+      const fileContext = this.config?.context || this.config?.servers?.context || null;
+      const requestModel = this.requestContextStorage.getStore()?.modelName;
+      const runtimeModel = requestModel ?? this.runtimeContext.modelName;
+      const envModel = process.env.D365FO_MODEL_NAME?.trim() || undefined;
+
+      let source = '.mcp.json';
+      if (runtimeModel) {
+        source = 'runtime context (from VS / VS Code)';
+      } else if (envModel) {
+        source = 'D365FO_MODEL_NAME env var';
+      } else if (fileContext?.modelName) {
+        source = '.mcp.json';
+      }
+      return { modelName: context.modelName, source };
     }
 
     const wp = context?.workspacePath;
@@ -856,11 +900,6 @@ class ConfigManager {
       return { modelName: this.autoDetectedProject.modelName, source: 'auto-detected from .rnrproj' };
     }
 
-    const envVar = process.env.D365FO_MODEL_NAME || null;
-    if (envVar) {
-      return { modelName: envVar, source: 'D365FO_MODEL_NAME env var' };
-    }
-
     return { modelName: null, source: '(not configured)' };
   }
 
@@ -872,6 +911,7 @@ class ConfigManager {
   async getWorkspaceInfoDiagnostics(): Promise<{
     modelName: string | null;
     modelSource: string;
+    isModelSourceAutoDetected: boolean;
     projectPath: string | null;
     projectSource: string;
     packagePath: string | null;
@@ -936,7 +976,8 @@ class ConfigManager {
       packageSource = 'well-known path probe';
     }
 
-    return { modelName, modelSource, projectPath, projectSource, packagePath, packageSource };
+    const isModelSourceAutoDetected = modelSource.includes('auto-detected');
+    return { modelName, modelSource, isModelSourceAutoDetected, projectPath, projectSource, packagePath, packageSource };
   }
 
   /**

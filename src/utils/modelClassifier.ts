@@ -51,6 +51,19 @@ export function getExtensionPrefix(): string {
 }
 
 /**
+ * Get the explicitly configured target model name from the environment.
+ *
+ * D365FO_MODEL_NAME is the model the server was told to write into. It is set
+ * deliberately by the developer (e.g. per server instance), so the model it
+ * names is custom by definition — see isCustomModel().
+ *
+ * Returns empty string when not configured.
+ */
+export function getConfiguredModelName(): string {
+  return process.env.D365FO_MODEL_NAME?.trim() || '';
+}
+
+/**
  * Get configurable object suffix from environment.
  * Returns the raw EXTENSION_SUFFIX value (trailing underscores stripped).
  * Empty string when not configured.
@@ -370,16 +383,26 @@ export function isCustomModel(modelName: string): boolean {
   if (isAutoDetectedCustomModel(modelName)) {
     return true;
   }
-  
+
+  // Priority 2: The explicitly configured target model (D365FO_MODEL_NAME) is
+  // custom by definition — it was named deliberately as the write target.
+  // This check is independent of the ISV prefix, which is frequently an
+  // abbreviation of the model name (e.g. prefix "CR" for model "ContosoRobotics")
+  // and therefore fails the literal startsWith() heuristic in Priority 4 below.
+  const configuredModel = getConfiguredModelName();
+  if (configuredModel && configuredModel.toLowerCase() === modelName.toLowerCase()) {
+    return true;
+  }
+
   const customModels = getCustomModels();
   const extensionPrefix = getExtensionPrefix();
-  
-  // Priority 2: Check if model matches any pattern in custom models list
+
+  // Priority 3: Check if model matches any pattern in custom models list
   const isInCustomList = customModels.some(pattern => matchesPattern(pattern, modelName));
-  
-  // Priority 3: Check if model starts with extension prefix
+
+  // Priority 4: Check if model starts with extension prefix
   const hasExtensionPrefix = !!(extensionPrefix && modelName.startsWith(extensionPrefix));
-  
+
   return isInCustomList || hasExtensionPrefix;
 }
 

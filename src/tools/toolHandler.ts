@@ -418,7 +418,7 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
           }
         }
 
-        const { modelName, modelSource, projectPath, projectSource, packagePath, packageSource } =
+        const { modelName, modelSource, isModelSourceAutoDetected, projectPath, projectSource, packagePath, packageSource } =
           await configManager.getWorkspaceInfoDiagnostics();
         const envType = await configManager.getDevEnvironmentType();
         const frameworkDirectory = await configManager.getMicrosoftPackagesPath();
@@ -441,10 +441,17 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
           'fleetmanagementunittests', 'tutorial',
         ]);
         const isPlaceholder = !modelName || PLACEHOLDER_NAMES.has(modelName.toLowerCase());
+        // The "Microsoft standard model" warning only makes sense for an AUTO-DETECTED
+        // model: its whole premise is that a .rnrproj scan landed on a standard/demo
+        // model because the developer forgot to change the VS new-project wizard default.
+        // An explicitly configured model (D365FO_MODEL_NAME env var or a modelName key
+        // in .mcp.json) was named deliberately, so second-guessing it produces false
+        // positives — e.g. a model whose ISV prefix is only an abbreviation of its name.
+        const isAutoDetectedSource = isModelSourceAutoDetected;
         // Also flag when auto-detection found a Microsoft standard model name
         // that isn't in the PLACEHOLDER_NAMES set but is not a custom model.
         const isStandardMsModel = modelName
-          ? !isCustomModel(modelName) && !isPlaceholder
+          ? !isCustomModel(modelName) && !isPlaceholder && isAutoDetectedSource
           : false;
 
         const lines: string[] = [
