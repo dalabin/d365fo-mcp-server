@@ -1229,7 +1229,9 @@ namespace D365MetadataBridge.Services
                         // classes live in the regular Classes collection (named *_Extension). The
                         // bridge can't filter them out here, so return nothing and let the caller
                         // fall back to the SQLite index, which indexes class-extension explicitly.
-                        case "class-extension": break;
+                        case "class-extension":
+                            Console.Error.WriteLine("[DEBUG] Search: class-extension requested — no IMetadataProvider collection; falling back to SQLite index");
+                            break;
                         case "form-extension": Search("form-extension", Keys("form-extension", () => prov.FormExtensions.GetPrimaryKeys())); break;
                         case "enum-extension": Search("enum-extension", Keys("enum-extension", () => prov.EnumExtensions.GetPrimaryKeys())); break;
                         case "edt-extension": Search("edt-extension", Keys("edt-extension", () => prov.EdtExtensions.GetPrimaryKeys())); break;
@@ -1278,20 +1280,21 @@ namespace D365MetadataBridge.Services
         {
             try
             {
-                dynamic providerDynamic = _provider;
-                dynamic privileges = providerDynamic.SecurityPrivileges;
+                // Access collections via IMetadataProvider interface (compile-time binding).
+                // Avoids RuntimeBinderException when DiskMetadataProvider (internal type)
+                // is accessed through dynamic from another assembly.
+                var privileges = _provider.SecurityPrivileges;
                 dynamic? axObj = privileges.Read(name);
                 // Fallback to reference provider (UDE: Microsoft packages)
                 if (axObj == null && _referenceProvider != null)
                 {
-                    dynamic refProv = _referenceProvider!;
-                    privileges = refProv.SecurityPrivileges;
+                    privileges = _referenceProvider!.SecurityPrivileges;
                     axObj = privileges.Read(name);
                 }
                 if (axObj == null) return null;
 
                 string? model = null;
-                try { var mi = privileges.GetModelInfo(name); if (mi?.Count > 0) model = ((IEnumerable<dynamic>)mi).First().Name; } catch { }
+                try { var mi = privileges.GetModelInfo(name); if (mi?.Count > 0) model = mi.First().Name; } catch { }
 
                 var entryPoints = new List<object>();
                 try
@@ -1312,17 +1315,17 @@ namespace D365MetadataBridge.Services
                 var parentDuties = new List<object>();
                 try
                 {
-                    foreach (var dutyName in providerDynamic.SecurityDuties.GetPrimaryKeys())
+                    foreach (var dutyName in _provider.SecurityDuties.GetPrimaryKeys())
                     {
                         try
                         {
-                            dynamic duty = providerDynamic.SecurityDuties.Read((string)dutyName);
+                            dynamic duty = _provider.SecurityDuties.Read(dutyName);
                             if (duty?.Privileges == null) continue;
                             foreach (var p in duty.Privileges)
                             {
                                 if ((string)p.Name == name)
                                 {
-                                    parentDuties.Add(new { name = (string)dutyName });
+                                    parentDuties.Add(new { name = dutyName });
                                     break;
                                 }
                             }
@@ -1358,20 +1361,21 @@ namespace D365MetadataBridge.Services
         {
             try
             {
-                dynamic providerDynamic = _provider;
-                dynamic duties = providerDynamic.SecurityDuties;
+                // Access collections via IMetadataProvider interface (compile-time binding).
+                // Avoids RuntimeBinderException when DiskMetadataProvider (internal type)
+                // is accessed through dynamic from another assembly.
+                var duties = _provider.SecurityDuties;
                 dynamic? axObj = duties.Read(name);
                 // Fallback to reference provider (UDE: Microsoft packages)
                 if (axObj == null && _referenceProvider != null)
                 {
-                    dynamic refProv = _referenceProvider!;
-                    duties = refProv.SecurityDuties;
+                    duties = _referenceProvider!.SecurityDuties;
                     axObj = duties.Read(name);
                 }
                 if (axObj == null) return null;
 
                 string? model = null;
-                try { var mi = duties.GetModelInfo(name); if (mi?.Count > 0) model = ((IEnumerable<dynamic>)mi).First().Name; } catch { }
+                try { var mi = duties.GetModelInfo(name); if (mi?.Count > 0) model = mi.First().Name; } catch { }
 
                 var childPrivileges = new List<object>();
                 try
@@ -1397,17 +1401,17 @@ namespace D365MetadataBridge.Services
                 var parentRoles = new List<object>();
                 try
                 {
-                    foreach (var roleName in providerDynamic.SecurityRoles.GetPrimaryKeys())
+                    foreach (var roleName in _provider.SecurityRoles.GetPrimaryKeys())
                     {
                         try
                         {
-                            dynamic role = providerDynamic.SecurityRoles.Read((string)roleName);
+                            dynamic role = _provider.SecurityRoles.Read(roleName);
                             if (role?.Duties == null) continue;
                             foreach (var d in role.Duties)
                             {
                                 if ((string)d.Name == name)
                                 {
-                                    parentRoles.Add(new { name = (string)roleName });
+                                    parentRoles.Add(new { name = roleName });
                                     break;
                                 }
                             }
@@ -1444,20 +1448,21 @@ namespace D365MetadataBridge.Services
         {
             try
             {
-                dynamic providerDynamic = _provider;
-                dynamic roles = providerDynamic.SecurityRoles;
+                // Access collections via IMetadataProvider interface (compile-time binding).
+                // Avoids RuntimeBinderException when DiskMetadataProvider (internal type)
+                // is accessed through dynamic from another assembly.
+                var roles = _provider.SecurityRoles;
                 dynamic? axObj = roles.Read(name);
                 // Fallback to reference provider (UDE: Microsoft packages)
                 if (axObj == null && _referenceProvider != null)
                 {
-                    dynamic refProv = _referenceProvider!;
-                    roles = refProv.SecurityRoles;
+                    roles = _referenceProvider!.SecurityRoles;
                     axObj = roles.Read(name);
                 }
                 if (axObj == null) return null;
 
                 string? model = null;
-                try { var mi = roles.GetModelInfo(name); if (mi?.Count > 0) model = ((IEnumerable<dynamic>)mi).First().Name; } catch { }
+                try { var mi = roles.GetModelInfo(name); if (mi?.Count > 0) model = mi.First().Name; } catch { }
 
                 var childDuties = new List<object>();
                 try
@@ -1532,25 +1537,34 @@ namespace D365MetadataBridge.Services
                 // Try primary provider first, then reference provider (UDE fallback)
                 foreach (var prov in new[] { _provider, _referenceProvider }.Where(p => p != null))
                 {
-                    dynamic providerDynamic = prov!;
-
                     foreach (var tryType in tryTypes)
                     {
                         try
                         {
-                            dynamic items = tryType switch
+                            // Access collections via IMetadataProvider interface (compile-time binding).
+                            // Avoids RuntimeBinderException when DiskMetadataProvider (internal type)
+                            // is accessed through dynamic from another assembly.
+                            dynamic? axObj = tryType switch
                             {
-                                "display" => providerDynamic.MenuItemDisplays,
-                                "action" => providerDynamic.MenuItemActions,
-                                "output" => providerDynamic.MenuItemOutputs,
+                                "display" => (object?)prov!.MenuItemDisplays.Read(name),
+                                "action"  => (object?)prov!.MenuItemActions.Read(name),
+                                "output"  => (object?)prov!.MenuItemOutputs.Read(name),
                                 _ => throw new InvalidOperationException()
                             };
-
-                            dynamic axObj = items.Read(name);
                             if (axObj == null) continue;
 
                             string? model = null;
-                            try { var mi = items.GetModelInfo(name); if (mi?.Count > 0) model = ((IEnumerable<dynamic>)mi).First().Name; } catch { }
+                            try
+                            {
+                                var rawMi = tryType switch
+                                {
+                                    "display" => (object?)prov!.MenuItemDisplays.GetModelInfo(name),
+                                    "action"  => (object?)prov!.MenuItemActions.GetModelInfo(name),
+                                    _         => (object?)prov!.MenuItemOutputs.GetModelInfo(name),
+                                };
+                                if (rawMi != null) { dynamic dmi = rawMi; if (dmi.Count > 0) model = (string?)dmi.First().Name; }
+                            }
+                            catch { }
 
                             return new
                             {
