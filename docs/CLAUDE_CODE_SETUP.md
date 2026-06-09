@@ -114,11 +114,11 @@ Claude Code's Tool Search feature defers MCP tool schemas to save context. When 
 
 ## Step 3 — Place `CLAUDE.md`
 
-Copy `CLAUDE.md` from the repo root to the parent folder of your D365FO solutions. Claude Code reads it automatically from the working directory upward, so one copy covers all solutions underneath.
+Copy `CLAUDE.template.md` from the repo root to the parent folder of your D365FO solutions, renaming it to `CLAUDE.md`. Claude Code reads it automatically from the working directory upward, so one copy covers all solutions underneath.
 
 ```powershell
-# Example: place in the parent of all your D365FO solution folders
-Copy-Item -Path "K:\d365fo-mcp-server\CLAUDE.md" -Destination "C:\source\repos\"
+# Example: place in the parent of all your D365FO solution folders, renamed to CLAUDE.md
+Copy-Item -Path "K:\d365fo-mcp-server\CLAUDE.template.md" -Destination "C:\source\repos\CLAUDE.md"
 ```
 
 `CLAUDE.md` reinforces the tool priority in plain language — telling Claude to use `d365fo-mcp-tools` for all X++ work regardless of what other tools are connected. `alwaysLoad` handles it technically; `CLAUDE.md` handles it instructionally.

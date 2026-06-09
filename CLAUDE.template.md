@@ -1,9 +1,11 @@
 # D365 Finance & Operations X++ Development
 
-<!-- Copy this file to the parent folder that contains all your D365FO solution folders
-     (the same folder where .github\copilot-instructions.md lives for Copilot users).
-     Claude Code reads CLAUDE.md automatically from the working directory upward,
-     so one copy here covers every solution underneath — no per-solution copies needed.
+<!-- TEMPLATE — this file is NOT auto-loaded from the d365fo-mcp-server repo root.
+     Copy it to the parent folder that contains all your D365FO solution folders
+     (the same folder where .github\copilot-instructions.md lives for Copilot users)
+     and SAVE IT AS `CLAUDE.md` there. Claude Code reads CLAUDE.md automatically from
+     the working directory upward, so one copy covers every solution underneath —
+     no per-solution copies needed.
 
      Full rules are delivered via the MCP `xpp_system_instructions` prompt.
      This file provides only the minimum static context needed when the MCP server

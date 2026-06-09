@@ -135,10 +135,10 @@ claude mcp add-json --scope user d365fo-mcp-tools '{"type":"stdio","command":"no
 
 > `alwaysLoad: true` loads the d365fo tool list at session start, preventing Claude from routing X++ lookups to other connected code intelligence tools or built-in search.
 
-**3.** Copy `CLAUDE.md` to the parent folder of your D365FO solutions:
+**3.** Copy `CLAUDE.template.md` to the parent folder of your D365FO solutions, renaming it to `CLAUDE.md`:
 
 ```powershell
-Copy-Item -Path "K:\d365fo-mcp-server\CLAUDE.md" -Destination "C:\source\repos\"
+Copy-Item -Path "K:\d365fo-mcp-server\CLAUDE.template.md" -Destination "C:\source\repos\CLAUDE.md"
 ```
 
 > **Full Claude Code setup guide (all scenarios, project-scoped `.mcp.json`, troubleshooting):** [docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_CODE_SETUP.md)
