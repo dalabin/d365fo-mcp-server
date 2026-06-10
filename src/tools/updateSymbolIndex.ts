@@ -118,6 +118,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         await bridgeRefreshProvider(context.bridge);
       } catch { /* bridge not available */ }
 
+      symbolIndex.touchLastIndexed?.();
+
       const parts_cleaned: string[] = [];
       if (deletedCount > 0) parts_cleaned.push(`${deletedCount} symbol(s)`);
       if (labelCount > 0) parts_cleaned.push(`${labelCount} label(s)`);
@@ -175,6 +177,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       }
 
       await invalidateCache(cache, labelFileId, 'label', [labelFileId]);
+      symbolIndex.touchLastIndexed?.();
 
       return {
         content: [{
@@ -319,6 +322,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
 
     // ── Invalidate Redis cache for the re-indexed object ────────────────────
     await invalidateCache(cache, objectName, objectType, [objectName]);
+    symbolIndex.touchLastIndexed?.();
 
     return {
       content: [{

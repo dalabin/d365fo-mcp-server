@@ -570,6 +570,17 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_mit_model ON menu_item_targets(model);
     `);
 
+    // ── Index Metadata (key-value) ───────────────────────────────────────────
+    // Small bookkeeping table: e.g. last_indexed_at drives the staleness
+    // detector in get_workspace_info.
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS _index_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+
     // ── Property Statistics ──────────────────────────────────────────────────
     // Distribution of metadata property values across STANDARD models, mined
     // during build-database. Drives data-driven BP property rules in
@@ -1208,6 +1219,8 @@ export class XppSymbolIndex {
       this.createFTSTriggers();
       console.log(`   ✅ Indexed ${models.length} model(s) in ${duration}s (FTS rebuilt in ${ftsDuration}s)`);
     }
+
+    this.touchLastIndexed();
   }
 
   /**
@@ -1906,6 +1919,31 @@ export class XppSymbolIndex {
       } catch (error) {
         console.error(`      ⚠️  Skipped ${extensionType} ${file}: ${error instanceof Error ? error.message : error}`);
       }
+    }
+  }
+
+  // ─── Index freshness bookkeeping ────────────────────────────────────────────
+
+  /** Record "the index was (re)built/updated now" — drives staleness detection. */
+  touchLastIndexed(): void {
+    try {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO _index_meta (key, value) VALUES ('last_indexed_at', ?)`,
+      ).run(new Date().toISOString());
+    } catch {
+      // Bookkeeping is best-effort
+    }
+  }
+
+  /** ISO timestamp of the last full or incremental index update, or null. */
+  getLastIndexedAt(): string | null {
+    try {
+      const row = this.getReadDb().prepare(
+        `SELECT value FROM _index_meta WHERE key = 'last_indexed_at'`,
+      ).get() as { value: string } | undefined;
+      return row?.value ?? null;
+    } catch {
+      return null;
     }
   }
 

@@ -67,6 +67,8 @@ import {
   DEDUP_EXCLUDED_TOOLS, DEDUP_TTL_MS,
   dedupKey, getDedupedResult, storeDedupResult, appendNote,
 } from '../utils/callDedup.js';
+import { checkIndexStaleness } from '../utils/indexStaleness.js';
+import * as nodePath from 'path';
 import { buildProgressMessage } from '../utils/toolProgressMessage.js';
 
 /**
@@ -604,6 +606,21 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
           }
           lines.push(``);
           lines.push(`To switch project: call get_workspace_info with projectName = "<ModelName>"`);
+        }
+
+        // -----------------------------------------------------------------------
+        // Index freshness — compare workspace mtimes vs last_indexed_at so the
+        // model (and user) know whether symbol lookups reflect current code.
+        // -----------------------------------------------------------------------
+        try {
+          const lastIndexedAt = context.symbolIndex.getLastIndexedAt?.() ?? null;
+          const modelMetadataDir = packagePath && modelName
+            ? nodePath.join(packagePath, modelName)
+            : null;
+          const staleness = checkIndexStaleness(lastIndexedAt, modelMetadataDir);
+          lines.push('', ...staleness.lines);
+        } catch {
+          // Freshness reporting is best-effort — never break get_workspace_info
         }
 
         // -----------------------------------------------------------------------
