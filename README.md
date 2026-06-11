@@ -21,7 +21,7 @@ AI assistants excel at C#, Python, and JavaScript. X++ is different: your D365FO
 
 This server pre-indexes your entire D365FO installation (580 000+ symbols across standard, ISV, and custom models) and exposes it as 60 specialized MCP tools. Every signature, every CoC wrapper, every label, every form pattern — verified against your real metadata **before** the AI writes a single line.
 
-![Solution Architecture](docs/img/solution-architecture-diagram.png)
+![Solution Architecture](docs/img/solution-architecture-diagram.svg)
 
 | Task | Without this server | With this server |
 |------|--------------------|------------------|
@@ -145,8 +145,6 @@ A `search` tool call returning results from your codebase = you're connected.
 ## Azure Deployment
 
 One shared instance for the whole team — the metadata index lives in Blob Storage and downloads automatically on startup.
-
-![Deployment Modes](docs/img/solution-architecture-diagram-deployment-modes.png)
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fdynamics365ninja%2Fd365fo-mcp-server%2Frefs%2Fheads%2Fmain%2Finfrastructure%2Fazuredeploy.json)
 
