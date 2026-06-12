@@ -407,6 +407,8 @@ final class SalesFormLetter_MyModel_Extension
       'DataEventHandler signature: static void handler(Common _sender, DataEventArgs _e)',
       'Validating events: cast _e to ValidateEventArgs, call _e.parmValidateResult(false) to fail',
       'NEVER use SubscribesTo + delegateStr for standard table data events — use DataEventHandler',
+      'REUSE BEFORE CREATING: call find_event_handlers first — if a handler class for the target already exists in the custom model, add the new handler method there instead of creating a parallel class',
+      'Both _EH and _EventHandler handler-class naming styles exist — follow the style already used in the model; never introduce a feature-named handler class (<Form>_<Feature>_EH) unless the user explicitly asks for a separate class',
     ],
     examples: [
       {
@@ -701,6 +703,8 @@ MyDocumentId newId = numSeq.num();
       'New controls: add via modify_d365fo_file(operation="add-control", parentControl="TabGeneral") — the control type is checked against the parent container\'s sub-pattern',
       'Data sources: add via modify_d365fo_file(operation="add-data-source")',
       'NEVER use PowerShell or read_file to inspect form XML — use get_form_info',
+      'A user-provided example form is a PATTERN CONTRACT: read it with get_form_info, keep the same pattern family, and verify the generated form keeps the required scaffolding (datasources, design pattern/version, ActionPane/Body/Tab/FastTab/grid/QuickFilter) — missing pattern elements are a failed generation even if the XML is well-formed',
+      'Edits must be additive: never drop unrelated <Controls>, <DataSources>, <DataSourceModifications>, methods, or pattern metadata — use targeted modify_d365fo_file operations and verify the diff with review_workspace_changes afterwards',
     ],
     related: ['coc', 'event-handlers', 'formrun-lifecycle'],
   },
@@ -1917,6 +1921,8 @@ select salesTable where salesTable.ShippingDateRequested == cutoffDate;`,
       'Wrappers can read/call protected members of the augmented class (PU9+); cannot reach private',
       'Pre-processing: call business logic before next. Post-processing: call next first, then business logic. Wrap: call next inside the logic',
       'Use get_method_signature tool to get exact parameter types before writing the wrapper',
+      'REUSE BEFORE CREATING: if a CoC extension class for the target already exists in the custom model (prepare_change / find_coc_extensions lists them), add the wrapper there — never create a parallel feature-named class (<Target>_<Feature>_Extension) unless the user explicitly requests separation',
+      'The class suffix comes from EXTENSION_NAMING_STYLE and existing related artifacts — never from feature names, tickets, or customer names; if it cannot be derived, ask the user',
     ],
     examples: [
       {

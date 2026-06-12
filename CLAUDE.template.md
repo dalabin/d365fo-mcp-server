@@ -59,6 +59,8 @@ Call `get_workspace_info()` before doing anything with D365FO objects.
 6. Never use hardcoded strings in Info/warning/error — use `@Model:Label`
 7. Call `search_labels()` before `create_label()` — reuse existing labels
 8. Extension naming depends on `EXTENSION_NAMING_STYLE` (check `get_workspace_info`). Default `prefix` → class `{Target}{Prefix}_Extension`, element `{Target}.{Prefix}Extension`; `model-name` → class `{Target}_{ModelName}_Extension`, element `{Target}.{ModelName}`. Pass the BASE name to `create_d365fo_file` and let the tool apply the token — don't hand-build the infix.
+9. Reuse before creating: if an extension/handler class for the target already exists in the custom model (`prepare_change` lists them), add the method there — never create a parallel feature-named class unless the user explicitly asks; never invent suffixes from feature/ticket/customer names
+10. After writes, check the diff is additive (`review_workspace_changes` or re-read via `get_*_info`) — unrelated nodes disappearing = failed edit → `undo_last_modification`
 
 ## Terminal Note
 

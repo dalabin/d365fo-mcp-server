@@ -73,6 +73,12 @@ PowerShell / any terminal command **WILL HANG** in VS 2022 / VS 2026 MCP integra
 
    Pass the BASE object name to `create_d365fo_file` and let the tool inject the token — don't hand-build the infix.
 
+### Reuse & diff safety
+
+10. **Reuse before creating** — `prepare_change` lists existing CoC wrappers and event handlers. If an extension or handler class in the custom model already owns the target, add the new method there. Never create a parallel feature-named class (`<Target>_<Feature>_Extension`, `<Form>_<Feature>_EH`) unless the user explicitly asks for a separate class. The suffix comes from `EXTENSION_NAMING_STYLE` / existing artifacts — never from feature, ticket, or customer names; if it cannot be derived, ask.
+11. **The post-write diff must be additive or narrowly targeted** — verify via `review_workspace_changes` (or re-read with `get_*_info`) that no unrelated XML nodes (`<DataSources>`, `<Controls>`, methods, pattern metadata) disappeared. If they did, the edit failed: `undo_last_modification`.
+12. **An example form named by the user is a pattern contract** — keep its pattern family and required scaffolding (datasources, ActionPane/Tab/grid/QuickFilter); missing pattern elements are a failed generation even if the XML is well-formed.
+
 ## Full Instructions
 
 The complete X++ rules, query grammar, CoC authoring rules, and workflow details are delivered via the MCP prompt `xpp_system_instructions`. If that prompt is not loaded, request it or consult [src/prompts/systemInstructions.ts](../src/prompts/systemInstructions.ts) directly.
