@@ -60,7 +60,7 @@ function parseSig(sigLine: string): ParsedSig | null {
 
   const params: Array<{ type: string; name: string }> = [];
   if (paramStr) {
-    for (const chunk of paramStr.split(',')) {
+    for (const chunk of splitTopLevelCommas(paramStr)) {
       // Strip default value: "TransDate _fromDate = dateNull()" → ["TransDate", "_fromDate"]
       const eqIdx = chunk.indexOf('=');
       const parts = (eqIdx !== -1 ? chunk.substring(0, eqIdx) : chunk)
@@ -76,6 +76,73 @@ function parseSig(sigLine: string): ParsedSig | null {
   }
 
   return { isClass: false, name: methodName, returnType, params };
+}
+
+/**
+ * Split a parameter list on commas at paren depth 0 only, so default values
+ * containing function calls ("TransDate _d = max(d1, d2)") stay in one chunk.
+ */
+function splitTopLevelCommas(paramStr: string): string[] {
+  const chunks: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of paramStr) {
+    if (ch === ',' && depth === 0) {
+      chunks.push(current);
+      current = '';
+      continue;
+    }
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth--;
+    current += ch;
+  }
+  if (current.trim()) chunks.push(current);
+  return chunks;
+}
+
+interface SigExtraction {
+  /** Full signature joined onto one line (handles parameter lists spanning multiple lines). */
+  sig: string;
+  attributeLines: string[];
+  indent: string;
+}
+
+/**
+ * Locate the declaration line(s) in a method/class source block, skipping any
+ * leading doc comments, regular comments, and attribute lines. Signatures whose
+ * parameter list spans multiple lines are joined into a single logical line.
+ */
+function extractSig(lines: string[]): SigExtraction | null {
+  const attributeLines: string[] = [];
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t || t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) continue;
+    if (t.startsWith('[')) {
+      attributeLines.push(t);
+      continue;
+    }
+    start = i;
+    break;
+  }
+  if (start === -1) return null;
+
+  const indent = lines[start].match(/^(\s*)/)?.[1] ?? '';
+
+  let sig = '';
+  let depth = 0;
+  let sawParen = false;
+  for (let j = start; j < lines.length; j++) {
+    sig += (sig ? ' ' : '') + lines[j].trim();
+    for (const ch of lines[j]) {
+      if (ch === '(') { depth++; sawParen = true; }
+      else if (ch === ')') depth--;
+    }
+    // Class declarations have no parens — single line is enough.
+    if (!sawParen || depth <= 0) break;
+  }
+
+  return { sig, attributeLines, indent };
 }
 
 // ── Humanization helpers ──────────────────────────────────────────────────────
@@ -290,10 +357,15 @@ export function ensureBlankLineBeforeClosingBrace(declaration: string): string {
 
 /**
  * Ensures every public or protected X++ method / class declaration has a
- * leading XML doc-comment block (/// <summary> … </summary>).
+ * leading XML doc-comment block (/// <summary> … </summary>) including
+ * `<param>` entries for every parameter and a `<returns>` entry for non-void
+ * return types.
  *
- * Idempotent — if `/// <summary>` is already present the source is returned
- * unchanged. Private / internal methods are left as-is per D365FO convention.
+ * When a doc block is already present (e.g. authored by the AI model) it is
+ * kept verbatim, but any missing `<param>` / `<returns>` elements are appended
+ * so the result always satisfies the D365FO Best Practice documentation rules.
+ * Idempotent — a complete block is returned unchanged. Private / internal
+ * methods are left as-is per D365FO convention.
  */
 export function ensureXppDocComment(source: string): string {
   // Strip leading blank lines — prevents gap at top of <Declaration>
@@ -304,33 +376,18 @@ export function ensureXppDocComment(source: string): string {
   const firstNonEmpty = lines.find(l => l.trim().length > 0);
   if (firstNonEmpty?.trim().startsWith('///')) {
     // Remove blank lines between /// doc-comment block and the next code line,
-    // then normalise the /// block indentation to match the method signature.
-    return normalizeDocBlockIndent(stripDocCommentGap(cleanSource));
+    // then normalise the /// block indentation to match the method signature,
+    // then fill in any <param> / <returns> elements the block is missing.
+    return completeExistingDocBlock(normalizeDocBlockIndent(stripDocCommentGap(cleanSource)));
   }
 
-  // Collect attribute lines before the signature (needed for class inference)
-  const attributeLines: string[] = [];
-  let sigLine = '';
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t || t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) {
-      continue;
-    }
-    if (t.startsWith('[')) {
-      attributeLines.push(t);
-      continue;
-    }
-    sigLine = t;
-    break;
-  }
-  if (!sigLine) return cleanSource;
+  const extraction = extractSig(lines);
+  if (!extraction) return cleanSource;
 
-  const parsed = parseSig(sigLine);
+  const parsed = parseSig(extraction.sig);
   if (!parsed) return cleanSource;
 
-  // Detect indentation from the signature line so doc comments align with the code
-  const sigLineRaw = lines.find(l => l.trim() === sigLine) ?? '';
-  const indent     = sigLineRaw.match(/^(\s*)/)?.[1] ?? '';
+  const { attributeLines, indent } = extraction;
 
   // ── Build doc block with meaningful, AI-quality descriptions ──────────────
   const doc: string[] = [];
@@ -349,13 +406,84 @@ export function ensureXppDocComment(source: string): string {
       const paramDesc = inferParamDescription(param.name, param.type);
       doc.push(`${indent}/// <param name="${param.name}">${paramDesc}</param>`);
     }
-    if (parsed.returnType && parsed.returnType !== 'void') {
+    if (parsed.returnType && parsed.returnType.toLowerCase() !== 'void') {
       const returnDesc = inferReturnDescription(parsed.returnType, parsed.name);
       doc.push(`${indent}/// <returns>${returnDesc}</returns>`);
     }
   }
 
   return doc.join('\n') + '\n' + cleanSource;
+}
+
+/**
+ * Completes an existing leading /// doc-comment block on a method: appends
+ * `<param>` elements for parameters that are not documented yet and a
+ * `<returns>` element when the method returns non-void and the block lacks one.
+ *
+ * The existing text (typically authored by the AI model) is never modified or
+ * reordered — only missing elements are inserted at the conventional position
+ * (params after `</summary>` / last `</param>`, returns after the params).
+ * Class declarations and already-complete blocks are returned unchanged.
+ */
+function completeExistingDocBlock(source: string): string {
+  const lines = source.split('\n');
+
+  // Leading /// block = consecutive /// lines at the top.
+  let docEnd = 0;
+  while (docEnd < lines.length && lines[docEnd].trim().startsWith('///')) docEnd++;
+  if (docEnd === 0) return source;
+
+  const docLines = lines.slice(0, docEnd);
+  const rest     = lines.slice(docEnd);
+
+  const extraction = extractSig(rest);
+  if (!extraction) return source;
+
+  const parsed = parseSig(extraction.sig);
+  if (!parsed || parsed.isClass) return source;
+
+  const { indent } = extraction;
+  const docText = docLines.join('\n');
+
+  const documentedParams = new Set<string>();
+  for (const m of docText.matchAll(/<param\s+name\s*=\s*"([^"]*)"/g)) {
+    documentedParams.add(m[1]);
+  }
+  const hasReturns = /<returns[\s/>]/.test(docText);
+
+  const missingParams = parsed.params.filter(p => !documentedParams.has(p.name));
+  const needsReturns =
+    !!parsed.returnType && parsed.returnType.toLowerCase() !== 'void' && !hasReturns;
+
+  if (missingParams.length === 0 && !needsReturns) return source;
+
+  // Anchor: after the last </param> line, else after the </summary> line,
+  // else at the end of the doc block.
+  let anchor = -1;
+  for (let i = 0; i < docLines.length; i++) {
+    if (docLines[i].includes('</param>')) anchor = i;
+  }
+  if (anchor === -1) {
+    anchor = docLines.findIndex(l => l.includes('</summary>'));
+  }
+  if (anchor === -1) anchor = docLines.length - 1;
+
+  const newDoc = [...docLines];
+  const paramAdditions = missingParams.map(
+    p => `${indent}/// <param name="${p.name}">${inferParamDescription(p.name, p.type)}</param>`
+  );
+  newDoc.splice(anchor + 1, 0, ...paramAdditions);
+
+  if (needsReturns) {
+    const returnsLine =
+      `${indent}/// <returns>${inferReturnDescription(parsed.returnType, parsed.name)}</returns>`;
+    // Conventional order is summary → params → returns → remarks, so inserting
+    // right after the params block also lands before any trailing <remarks>.
+    const insertIdx = anchor + 1 + paramAdditions.length;
+    newDoc.splice(insertIdx, 0, returnsLine);
+  }
+
+  return [...newDoc, ...rest].join('\n');
 }
 
 /**
