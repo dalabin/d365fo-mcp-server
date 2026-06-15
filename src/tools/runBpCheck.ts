@@ -68,8 +68,11 @@ export const runBpCheckTool = async (params: any, _context: any) => {
 
     // metadataPath: where X++ source XML lives (custom model metadata)
     const metadataPath = customPackagesPath || packagesRoot;
-    // packagesRootPath: where compiled binaries live (framework packages)
-    const packagesRootPath = microsoftPackagesPath || packagesRoot;
+    // packagesRootPath (-compilerMetadata): where compiled binaries live.
+    // Must be the CUSTOM model packages path, not the framework dir —
+    // compiled artifacts are written to the custom path, so xppbp must
+    // look there or it emits CompilerMetadataMissing for newly-added classes.
+    const packagesRootPath = customPackagesPath || packagesRoot;
 
     /**
      * xppbp.exe CLI flag styles observed across versions:

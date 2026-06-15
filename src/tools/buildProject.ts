@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { getConfigManager } from '../utils/configManager.js';
 import { forceReleaseLock } from '../utils/operationLocks.js';
 import { lookupErrorFix } from './d365foErrorHelp.js';
+import { generateRuntimeMetadata } from './generateMetadata.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -569,6 +570,26 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
         await writeBuildState(errState, customPackagesPath).catch(() => {});
       });
       return;
+    }
+
+    // All models built — regenerate .md runtime metadata manifests from XML source.
+    // xppc produces the compiled .netmodule but does NOT update the binary .md
+    // manifests that the AOS uses to resolve class names at runtime. Without this
+    // step, newly added classes are invisible to D365 after deployment even though
+    // the assembly compiled successfully.
+    const metaResult = await generateRuntimeMetadata(
+      microsoftPackagesPath,
+      customPackagesPath,
+      liveState.targetModel,
+    );
+    if (metaResult.skipped) {
+      await buildLog('WARN', `Runtime metadata regeneration skipped: ${metaResult.message}`);
+    } else if (metaResult.success) {
+      await buildLog('INFO', `Runtime metadata regenerated: ${metaResult.message}`);
+      await appendFile(state.logFile, `\n✅ Runtime metadata (.md) regenerated for ${liveState.targetModel}\n`, 'utf-8').catch(() => {});
+    } else {
+      await buildLog('WARN', `Runtime metadata regeneration failed (build still succeeded): ${metaResult.message}`);
+      await appendFile(state.logFile, `\n⚠️ Runtime metadata (.md) regeneration failed — VS build required for deployment of new classes:\n${metaResult.message}\n`, 'utf-8').catch(() => {});
     }
 
     // All models built — finalise as succeeded
