@@ -432,6 +432,40 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       };
     }
 
+    // Guard against silently scaffolding a brand-new label file at the WRONG path.
+    // When the label file is missing AND we're about to create it, verify the model
+    // directory actually exists at the resolved location. If it doesn't, the package
+    // path/name almost certainly points to the default PackagesLocalDirectory while the
+    // model's metadata lives somewhere else (e.g. a repo checkout) — creating the file
+    // here would "succeed" but write to a location D365FO never reads. Fail loudly with
+    // guidance instead of producing a phantom label file.
+    if (labelFileMissing && createLabelFileIfMissing) {
+      let modelDirExists = false;
+      try {
+        await fs.access(modelDir);
+        modelDirExists = true;
+      } catch { /* missing */ }
+      if (!modelDirExists) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `❌ Cannot create label file "${labelFileId}" — the model directory does not exist at the resolved path:\n` +
+                `    ${modelDir}\n\n` +
+                `Resolved package: "${resolvedPackageName}"  |  packages root: "${resolvedPackagePath}"\n\n` +
+                `This usually means the model's metadata lives somewhere other than the default ` +
+                `PackagesLocalDirectory (e.g. a repo checkout). Re-run with the correct location, for example:\n` +
+                `  labels(action="create", labelId="${labelId}", labelFileId="${labelFileId}", model="${model}",\n` +
+                `         packageName="<ActualPackageFolder>", packagePath="<root that contains it>", createLabelFileIfMissing=true)\n\n` +
+                `Nothing was written.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     let existingLanguages: string[];
 
     if (requestedLanguages.length > 0) {
@@ -597,6 +631,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const skipLines = [
         `⚠️ Label "${labelId}" already exists in all languages:\n` +
         skipped.map(s => `  - ${s}`).join('\n') +
+        `\n\nLocation: ${labelResourcesDir}` +
+        `\nPackage : ${resolvedPackageName} @ ${resolvedPackagePath}` +
         '\n\nNo label text changes were made.',
       ];
       if (addedToProject.length > 0) {
@@ -618,6 +654,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       '',
       `Label ID   : ${labelId}`,
       `Label File : ${labelFileId}  (model: ${model})`,
+      `Package    : ${resolvedPackageName} @ ${resolvedPackagePath}`,
+      `Location   : ${labelResourcesDir}`,
       '',
       'Written to languages:',
       ...written.map(l => `  ✔ ${l}  → ${translationMap.get(l)?.text ?? enUsText}`),

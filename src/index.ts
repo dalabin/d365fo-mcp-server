@@ -340,7 +340,30 @@ async function initializeBridge(targetContext: import('./types/context.js').XppS
         referencePackagesPath = msPath;
       }
     } else {
-      packagesPath = configMgr.getPackagePath() ?? undefined;
+      // Traditional: the MS PackagesLocalDirectory is the canonical metadata root.
+      const pldPath = configMgr.getPackagePath() ?? undefined;
+      // A custom metadata root — e.g. a repo checkout configured via
+      // context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH — may hold the
+      // model being edited. If it differs from the PLD, make it the PRIMARY
+      // provider and keep the PLD as the reference provider so BOTH custom and
+      // Microsoft-shipped objects resolve. Without this, modify/create via the
+      // bridge can't find objects whose metadata lives outside the PLD (the
+      // bridge resolves objects by its configured roots, not per-call paths).
+      const customPath = await configMgr.getCustomPackagesPath();
+      const { existsSync } = await import('fs');
+      const { join, resolve } = await import('path');
+      const samePath = (a?: string, b?: string) =>
+        !!a && !!b && resolve(a).toLowerCase() === resolve(b).toLowerCase();
+      if (customPath && existsSync(customPath) && !samePath(customPath, pldPath)) {
+        packagesPath = customPath;
+        if (pldPath) {
+          referencePackagesPath = pldPath;
+          const candidate = join(pldPath, 'bin');
+          if (existsSync(candidate)) binPath = candidate;
+        }
+      } else {
+        packagesPath = pldPath;
+      }
     }
 
     // Pass xref connection details for UDE environments

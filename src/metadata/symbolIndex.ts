@@ -3354,6 +3354,26 @@ export class XppSymbolIndex {
   }
 
   /**
+   * Get the physical .label.txt file path for each language of a label file.
+   * Used by labels(action="info", labelFileId=…) so callers get the on-disk
+   * location per language instead of having to shell out to find it.
+   */
+  getLabelFilePaths(
+    labelFileId: string,
+    model?: string,
+  ): Array<{ language: string; filePath: string; model: string }> {
+    const params: any[] = [labelFileId];
+    let sql = `
+      SELECT DISTINCT language, file_path AS filePath, model
+      FROM labels
+      WHERE label_file_id = ? AND file_path IS NOT NULL AND file_path != ''
+    `;
+    if (model) { sql += ` AND model = ?`; params.push(model); }
+    sql += ` ORDER BY language`;
+    return this.labelsDb.prepare(sql).all(...params) as any[];
+  }
+
+  /**
    * Remove all labels for the given models (used during incremental rebuild)
    */
   clearLabelsForModels(models: string[]): void {

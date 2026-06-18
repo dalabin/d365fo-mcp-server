@@ -357,6 +357,14 @@ const ModifyD365FileArgsSchema = z.object({
   createBackup: z.boolean().optional().default(false).describe('Create a .bak backup of the file before modifying it (default: false). Changes can also be reverted with undo_last_modification (git checkout) without a backup. Set true when the file is not under source control.'),
   modelName: z.string().optional().describe('Model name (auto-detected if not provided). Pass this if the file was just created and is not yet indexed.'),
   packageName: z.string().optional().describe('Package name. Auto-resolved if omitted.'),
+  packagePath: z.string().optional().describe(
+    'Root packages path to search when the object lives outside the default PackagesLocalDirectory ' +
+    '(e.g. a repo metadata checkout like "K:\\\\repos\\\\…\\\\metadata"). Used to locate the file for ' +
+    'backup and the direct-XML fallback. NOTE: bridge-backed operations (add-method, add-field, etc.) ' +
+    'resolve objects via the C# bridge, which is configured with fixed roots at startup — if the model ' +
+    'is not under the bridge\'s roots, set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH so ' +
+    'the bridge picks it up, or pass an explicit filePath.'
+  ),
   workspacePath: z.string().optional().describe('Path to workspace for finding file'),
   filePath: z.string().optional().describe(
     'Absolute path to the XML file. Use this when the object was just created and the path is already known ' +
@@ -509,15 +517,18 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     }
 
     // 1. Find the file
-    const filePath = await findD365File(symbolIndex, objectType, objectName, modelName, workspacePath, explicitFilePath);
+    const filePath = await findD365File(symbolIndex, objectType, objectName, modelName, workspacePath, explicitFilePath, args.packagePath);
 
     if (!filePath) {
       throw new Error(
         `File not found for ${objectType} "${objectName}".\n\n` +
         `Retry options (do NOT use PowerShell — this tool can handle it):\n` +
         `  1. Pass modelName="<YourModel>" — triggers filesystem lookup by path.\n` +
-        `  2. Pass filePath="K:\\\\AosService\\\\PackagesLocalDirectory\\\\<pkg>\\\\<model>\\\\${objectName}.xml" — bypasses all lookup.\n` +
-        `  3. If the object was just created, re-run d365fo_file(action="create") first and use the returned path as filePath.`
+        `  2. Pass packagePath="<root that contains the model>" if the metadata lives outside the default PackagesLocalDirectory (e.g. a repo checkout).\n` +
+        `  3. Pass filePath="K:\\\\AosService\\\\PackagesLocalDirectory\\\\<pkg>\\\\<model>\\\\${objectName}.xml" — bypasses all lookup.\n` +
+        `  4. If the object was just created, re-run d365fo_file(action="create") first and use the returned path as filePath.\n\n` +
+        `If the file exists but bridge operations still fail to resolve the object, the C# bridge's metadata roots ` +
+        `(fixed at startup) likely don't include this model — set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH and restart the server.`
       );
     }
 
@@ -1090,7 +1101,8 @@ async function findD365File(
   objectName: string,
   modelName?: string,
   _workspacePath?: string,
-  explicitFilePath?: string
+  explicitFilePath?: string,
+  packagePath?: string,
 ): Promise<string | null> {
   // Explicit path bypasses all lookup — use when caller knows the exact location
   // (e.g. the path was returned by create_d365fo_file).
@@ -1177,7 +1189,7 @@ async function findD365File(
 
   // Filesystem fallback: handles newly created files not yet in the symbol index,
   // and all types not covered by the symbol DB (edt, report, extensions, security, menu …).
-  return findD365FileOnDisk(objectType, objectName, modelName);
+  return findD365FileOnDisk(objectType, objectName, modelName, packagePath);
 }
 
 /**
@@ -1188,7 +1200,8 @@ async function findD365File(
 export async function findD365FileOnDisk(
   objectType: string,
   objectName: string,
-  modelName?: string
+  modelName?: string,
+  explicitPackagePath?: string,
 ): Promise<string | null> {
   const folderMap: Record<string, string> = {
     class: 'AxClass',
@@ -1253,6 +1266,29 @@ export async function findD365FileOnDisk(
   // Try this before the MS PLD so we find repo-tracked objects first.
   const customWritePath = await configManager.getCustomPackagesPath();
 
+  // Candidate 0: caller-supplied packagePath. Highest priority — the caller knows
+  // the model lives outside the default PackagesLocalDirectory (e.g. a repo checkout).
+  // Try both the package==model layout and a PackageResolver scan rooted here so a
+  // package!=model layout (e.g. package "ACAUTOCONT" / model "AC AUTOCONT") still resolves.
+  if (explicitPackagePath) {
+    const directPath = path.join(explicitPackagePath, resolvedModel, resolvedModel, objectFolder, `${objectName}.xml`);
+    try {
+      await fs.access(directPath);
+      console.error(`[modifyD365File] Found via explicit packagePath: ${directPath}`);
+      return directPath;
+    } catch { /* try resolver scan below */ }
+    try {
+      const resolver = new PackageResolver([explicitPackagePath]);
+      const resolved = await resolver.resolve(resolvedModel);
+      if (resolved) {
+        const resolvedPath = path.join(resolved.rootPath, resolved.packageName, resolvedModel, objectFolder, `${objectName}.xml`);
+        await fs.access(resolvedPath);
+        console.error(`[modifyD365File] Found via explicit packagePath (PackageResolver): ${resolvedPath}`);
+        return resolvedPath;
+      }
+    } catch { /* not found under explicit packagePath; fall through */ }
+  }
+
   // Candidate 1: custom write root, package == model (most common for custom models)
   if (customWritePath) {
     const customCandidatePath = path.join(
@@ -1293,7 +1329,7 @@ export async function findD365FileOnDisk(
   try {
     const envType = await configManager.getDevEnvironmentType();
     const msPath = envType === 'ude' ? await configManager.getMicrosoftPackagesPath() : null;
-    const roots = [customWritePath, msPath, configPackagePath].filter(Boolean) as string[];
+    const roots = [explicitPackagePath, customWritePath, msPath, configPackagePath].filter(Boolean) as string[];
     const resolver = new PackageResolver(roots);
     const resolved = await resolver.resolve(resolvedModel);
     if (resolved) {

@@ -3830,14 +3830,54 @@ export async function handleCreateD365File(
 
     if (fileExisted) {
       if (!args.overwrite) {
+        // Surface what's already on disk so the caller doesn't have to read the
+        // file in chunks just to discover its contents. Previously this branch
+        // returned only "already exists", forcing repeated read_file calls.
+        let existingContent = '';
+        try {
+          existingContent = await fs.readFile(normalizedFullPath, 'utf-8');
+        } catch { /* unreadable — fall through with no summary */ }
+
+        let existingSummary = '';
+        let inlineContent = '';
+        if (existingContent) {
+          const methodNames = [...existingContent.matchAll(/<Method>\s*<Name>([^<]+)<\/Name>/g)].map(m => m[1]);
+          const fieldNames = [...existingContent.matchAll(/<AxTableField[A-Za-z]*>\s*<Name>([^<]+)<\/Name>/g)].map(m => m[1]);
+          const summaryParts: string[] = [];
+          if (methodNames.length) {
+            summaryParts.push(`${methodNames.length} method(s): ${methodNames.slice(0, 30).join(', ')}${methodNames.length > 30 ? ', …' : ''}`);
+          }
+          if (fieldNames.length) {
+            summaryParts.push(`${fieldNames.length} field(s): ${fieldNames.slice(0, 30).join(', ')}${fieldNames.length > 30 ? ', …' : ''}`);
+          }
+          const sizeKb = (Buffer.byteLength(existingContent, 'utf-8') / 1024).toFixed(1);
+          existingSummary = `\n\n📄 Existing file (${sizeKb} KB):` +
+            (summaryParts.length ? `\n  ${summaryParts.join('\n  ')}` : ' (no methods/fields detected)');
+
+          // Inline the full content when small enough to be useful in one shot;
+          // otherwise point at the targeted readers rather than dumping a huge file.
+          const INLINE_LIMIT = 8000;
+          inlineContent = existingContent.length <= INLINE_LIMIT
+            ? `\n\n----- BEGIN ${path.basename(normalizedFullPath)} -----\n${existingContent}\n----- END -----`
+            : `\n\n(File is ${sizeKb} KB — too large to inline. Use get_method / get_object_info to read specific members.)`;
+        }
+
+        // When the requested objectName was normalized to a different on-disk name,
+        // say so explicitly — the file that "already exists" can otherwise look
+        // unrelated to what the caller asked for (e.g. "Foo_Extension" → "FooAc_Extension").
+        const nameNote = finalObjectName !== args.objectName
+          ? `\n\nℹ️ Note: objectName "${args.objectName}" was normalized to "${finalObjectName}" ` +
+            `(active naming style/prefix), so this is the file that matches your request.`
+          : '';
+
         return {
           content: [
             {
               type: 'text',
-              text: `⚠️ File already exists: ${normalizedFullPath}\n\nOptions:\n` +
+              text: `⚠️ File already exists: ${normalizedFullPath}${nameNote}${existingSummary}\n\nOptions:\n` +
                 `  1. Pass overwrite=true together with xmlContent to replace the file.\n` +
                 `  2. Use d365fo_file(action="modify") to make targeted changes (rename-field, replace-all-fields, modify-property, …).\n` +
-                `  3. Choose a different objectName.`,
+                `  3. Choose a different objectName.${inlineContent}`,
             },
           ],
           isError: true,

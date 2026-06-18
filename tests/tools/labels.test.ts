@@ -93,6 +93,7 @@ const buildContext = (overrides: Partial<XppServerContext> = {}): XppServerConte
     searchLabels: vi.fn(() => []),
     getLabelById: vi.fn(() => undefined),
     getLabelFileIds: vi.fn(() => []),
+    getLabelFilePaths: vi.fn(() => []),
     getCustomModels: vi.fn(() => ['MyModel']),
     insertOrUpdateLabel: vi.fn(),
     searchSymbols: vi.fn(() => []),
@@ -187,6 +188,31 @@ describe('get_label_info', () => {
     expect(text).toContain('SYS');
   });
 
+  it('returns physical file paths per language when labelFileId is given without labelId', async () => {
+    (ctx.symbolIndex.getLabelFileIds as any).mockReturnValue([
+      { labelFileId: 'MyModel', model: 'MyModel', languages: 'en-US,cs' },
+      { labelFileId: 'SYS', model: 'ApplicationSuite', languages: 'en-US' },
+    ]);
+    (ctx.symbolIndex.getLabelFilePaths as any).mockReturnValue([
+      { language: 'en-US', filePath: 'K:\\repos\\meta\\MyModel\\MyModel\\AxLabelFile\\LabelResources\\en-US\\MyModel.en-US.label.txt', model: 'MyModel' },
+      { language: 'cs', filePath: 'K:\\repos\\meta\\MyModel\\MyModel\\AxLabelFile\\LabelResources\\cs\\MyModel.cs.label.txt', model: 'MyModel' },
+    ]);
+
+    const result = await getLabelInfoTool(
+      req('get_label_info', { labelFileId: 'MyModel' }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(ctx.symbolIndex.getLabelFilePaths as any).toHaveBeenCalledWith('MyModel', undefined);
+    const text = result.content[0].text;
+    // Narrowed to the requested file only — SYS must not appear.
+    expect(text).not.toContain('SYS');
+    expect(text).toContain('en-US');
+    expect(text).toContain('MyModel.en-US.label.txt');
+    expect(text).toContain('MyModel.cs.label.txt');
+  });
+
   it('returns no-files message when no label files exist', async () => {
     (ctx.symbolIndex.getLabelFileIds as any).mockReturnValue([]);
     const result = await getLabelInfoTool(req('get_label_info', {}), ctx);
@@ -263,6 +289,57 @@ describe('create_label', () => {
     // Result is success (file write is mocked) or at minimum not a Zod validation error
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toMatch(/created|success|MyNewFeature/i);
+  });
+
+  it('reports the resolved package + physical location in the success output', async () => {
+    (ctx.symbolIndex.getLabelById as any).mockReturnValue([]);
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'TransparencyTest',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Transparency test' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0].text;
+    expect(text).toContain('Package');
+    expect(text).toContain('Location');
+    // The resolved packages root must be surfaced so the caller can see WHERE it wrote.
+    expect(text).toContain('PackagesLocalDirectory');
+  });
+
+  it('fails loudly instead of scaffolding a label file when the model directory does not exist', async () => {
+    const fsMock = await import('fs');
+    (fsMock.promises.writeFile as any).mockClear();
+    // No language folders discovered (label file missing) …
+    (fsMock.promises.readdir as any).mockImplementation(async () => []);
+    // … and the model directory itself does not exist at the resolved path.
+    (fsMock.promises.access as any).mockImplementation(async () => { throw new Error('ENOENT'); });
+
+    (ctx.symbolIndex.getLabelById as any).mockReturnValue([]);
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'PhantomLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Should not be written' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/model directory does not exist|Nothing was written/i);
+    // No .label.txt should have been written.
+    expect((fsMock.promises.writeFile as any)).not.toHaveBeenCalled();
   });
 
   it('adds label file descriptors to VS project', async () => {

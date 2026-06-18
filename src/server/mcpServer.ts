@@ -561,7 +561,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               packagePath: {
                 type: 'string',
-                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory)'
+                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory). Also used by [modify] to locate objects whose metadata lives outside the default PackagesLocalDirectory (e.g. a repo checkout). Note: bridge-backed modify operations resolve objects via the C# bridge\'s startup roots — if the model is outside them, set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH instead, or pass an explicit filePath.'
               },
               sourceCode: {
                 type: 'string',
@@ -875,7 +875,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
           description:
             'Unified label operations — read and write. Choose an `action`:\n' +
             '• search → full-text query across indexed label files (read). Always run before action=create.\n' +
-            '• info → all language translations for a labelId, OR list available label files when labelId is omitted (read).\n' +
+            '• info → all language translations for a labelId, OR list available label files when labelId is omitted. Pass labelFileId (without labelId) to get that label file plus the physical .label.txt path per language (read).\n' +
             '• create → add a new label to an AxLabelFile, write into every language .label.txt, create XML descriptors if missing (write). Label IDs describe MEANING — never add a model prefix.\n' +
             '• rename → rename a label ID across .label.txt + X++ + XML metadata + SQLite index. Use dryRun=true first (write).',
           inputSchema: {
@@ -893,7 +893,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               labelFileId: {
                 type: 'string',
-                description: '[search|info|create|rename] AxLabelFile ID (e.g. ContosoExt, SYS).',
+                description: '[search|info|create|rename] AxLabelFile ID (e.g. ContosoExt, SYS). For action=info with no labelId, returns the physical .label.txt path per language.',
               },
               language: {
                 type: 'string',
@@ -1195,11 +1195,11 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             },
             scenario: {
               type: 'string',
-              enum: ['data-validation', 'field-defaulting', 'business-logic-change',
+              enum: ['data-validation', 'field-defaulting', 'field-change-reaction', 'business-logic-change',
                      'outbound-integration', 'inbound-data', 'ui-modification',
                      'document-output', 'number-sequence', 'security-access',
                      'batch-processing', 'custom'],
-              description: '[strategy] Scenario category (auto-detected from goal if omitted).',
+              description: '[strategy] Scenario category (auto-detected from goal if omitted). field-defaulting = set defaults on NEW records (initValue); field-change-reaction = react when a user/code CHANGES a field (modifiedField).',
             },
             handlerType: {
               type: 'string',

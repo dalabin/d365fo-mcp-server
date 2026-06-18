@@ -31,14 +31,25 @@ export async function getLabelInfoTool(request: CallToolRequest, context: XppSer
 
     // ── Mode A: no labelId → list available AxLabelFile IDs ─────────────────
     if (!labelId) {
-      const files = symbolIndex.getLabelFileIds(model);
+      let files = symbolIndex.getLabelFileIds(model);
+
+      // When a specific labelFileId is requested, narrow the listing to it and
+      // additionally surface the physical .label.txt path for each language so
+      // the caller never has to shell out to locate the file on disk.
+      if (labelFileId) {
+        files = files.filter(f => f.labelFileId.toLowerCase() === labelFileId.toLowerCase());
+      }
+
       if (files.length === 0) {
         return {
           content: [
             {
               type: 'text',
               text:
-                `No label files found${model ? ` for model "${model}"` : ''}.\n` +
+                `No label files found` +
+                (labelFileId ? ` matching labelFileId "${labelFileId}"` : '') +
+                (model ? ` for model "${model}"` : '') +
+                `.\n` +
                 `Make sure labels are indexed (run build-database with INCLUDE_LABELS=true).`,
             },
           ],
@@ -46,13 +57,32 @@ export async function getLabelInfoTool(request: CallToolRequest, context: XppSer
       }
 
       const lines: string[] = [
-        `Available AxLabelFile IDs${model ? ` in model "${model}"` : ''}:`,
+        labelFileId
+          ? `Label file "${labelFileId}"${model ? ` in model "${model}"` : ''}:`
+          : `Available AxLabelFile IDs${model ? ` in model "${model}"` : ''}:`,
         '',
       ];
       for (const f of files) {
         lines.push(`  LabelFileId : ${f.labelFileId}`);
         lines.push(`  Model       : ${f.model}`);
         lines.push(`  Languages   : ${f.languages}`);
+
+        // Physical file paths per language (only when a specific file was asked for,
+        // so the generic "list everything" view stays compact).
+        if (labelFileId) {
+          const paths = symbolIndex.getLabelFilePaths(f.labelFileId, model);
+          if (paths.length > 0) {
+            lines.push(`  Files       :`);
+            for (const p of paths) {
+              lines.push(`    [${p.language.padEnd(6)}] ${p.filePath}`);
+            }
+          } else {
+            lines.push(
+              `  Files       : (no physical path indexed — label rows may predate path tracking; ` +
+              `re-run build-database with INCLUDE_LABELS=true to populate file paths)`,
+            );
+          }
+        }
         lines.push('');
       }
       lines.push(

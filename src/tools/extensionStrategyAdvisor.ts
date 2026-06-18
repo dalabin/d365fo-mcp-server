@@ -13,6 +13,7 @@ import type { XppServerContext } from '../types/context.js';
 const scenarioTypes = [
   'data-validation',
   'field-defaulting',
+  'field-change-reaction',
   'business-logic-change',
   'outbound-integration',
   'inbound-data',
@@ -120,6 +121,47 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     antiPatterns: [
       { wrong: 'Overriding insert()', why: 'insert() is for persistence — defaults belong in initValue()' },
       { wrong: 'Form init()', why: 'Form init runs once at form open, not per new record' },
+    ],
+  },
+
+  // ── Reacting to a user/field value change ─────────────────────────────
+  {
+    id: 'field-change-reaction',
+    scenarios: ['field-change-reaction'],
+    goalKeywords: [
+      'when the user changes', 'when a user changes', 'when user changes', 'user changes',
+      'react to', 'react when', 'respond when', 'on field change', 'field is changed',
+      'field changes', 'changes a field', 'when a field', 'recalculate when', 'update when',
+      'modifiedfield', 'modified field', 'onmodifiedfield', 'cascade', 'depends on',
+      'clear when', 'reset when',
+    ],
+    mechanism: 'CoC on table.modifiedField() (or form data source modifiedField / onModifiedField event)',
+    reasoning:
+      'modifiedField() fires every time a field value changes on an EXISTING or new record — including ' +
+      'edits made by the user in the UI and changes made in X++. It is the correct entry point for ' +
+      'reacting to a value change (recalculating dependent fields, clearing related values, cascading ' +
+      'defaults). Do NOT use initValue() for this — initValue() runs ONCE when the record is first ' +
+      'created and never fires again when the user later edits a field.',
+    risks: [
+      'modifiedField receives a FieldId — switch on fieldNum(Table, Field) so the logic only runs for the field you care about',
+      'When using CoC, call next() first so the kernel applies its own modifiedField logic before yours',
+      'modifiedField runs per keystroke-commit on the form — keep the logic cheap and avoid heavy queries',
+      'It does NOT fire for set-based data updates (update_recordset / DMF import) — add table-level logic if those paths matter',
+    ],
+    alternatives: [
+      { mechanism: 'CoC on table.modifiedField()', when: 'The reaction must apply everywhere the field changes (UI, X++, services)' },
+      { mechanism: 'Form data source field modified() / onModified event', when: 'The reaction is UI-specific and should NOT apply to service/entity writes' },
+      { mechanism: 'CoC on table.modifiedFieldValue()', when: 'You also need the previous value to decide what to do' },
+    ],
+    nextSteps: [
+      'analyze_extension_points("TableName") — confirm modifiedField is CoC-eligible and see existing extensions',
+      'get_method(include="signature", "TableName", "modifiedField", includeCocTemplate: true) — get the CoC skeleton',
+      'find_coc_extensions("TableName", "modifiedField") — check for existing wrappers',
+    ],
+    antiPatterns: [
+      { wrong: 'CoC on initValue()', why: 'initValue fires only at record creation — it will NOT run when the user later changes the field' },
+      { wrong: 'Overriding the field on the form only', why: 'Misses X++ and service writes — table-level modifiedField is safer unless the reaction is purely cosmetic' },
+      { wrong: 'validateField for side effects', why: 'validateField is for accept/reject decisions, not for mutating other fields' },
     ],
   },
 
@@ -383,6 +425,7 @@ function detectScenario(goal: string): typeof scenarioTypes[number] | undefined 
   const scenarioKeywordMap: { scenario: typeof scenarioTypes[number]; keywords: string[] }[] = [
     { scenario: 'data-validation', keywords: ['validat', 'check', 'verify', 'must be', 'cannot be', 'not allowed', 'mandatory', 'required field', 'constraint'] },
     { scenario: 'field-defaulting', keywords: ['default', 'init value', 'auto-fill', 'prefill', 'auto-populate', 'initvalue'] },
+    { scenario: 'field-change-reaction', keywords: ['when the user changes', 'when user changes', 'user changes', 'react to', 'react when', 'field is changed', 'field changes', 'changes a field', 'recalculate when', 'modifiedfield', 'modified field', 'on field change', 'cascade', 'clear when', 'reset when'] },
     { scenario: 'outbound-integration', keywords: ['send to', 'notify external', 'push to', 'outbound', 'power automate', 'service bus', 'webhook', 'event grid', 'publish event'] },
     { scenario: 'inbound-data', keywords: ['import', 'inbound', 'data entity', 'odata', 'dmf', 'dixf', 'data migration', 'bulk load', 'rest api'] },
     { scenario: 'ui-modification', keywords: ['form', 'add field', 'add button', 'add tab', 'hide control', 'lookup', 'display method', 'dialog', 'action pane'] },
@@ -508,7 +551,8 @@ function formatNoMatch(goal: string, objectName?: string): string {
   out += `\n**General guidance:**\n\n`;
   out += `| Goal | Mechanism |\n|------|----------|\n`;
   out += `| Validate data | Table event (onValidatedWrite) or CoC on validateWrite() |\n`;
-  out += `| Default field values | Table event (onInitValue) or CoC on initValue() |\n`;
+  out += `| Default field values (on new record) | Table event (onInitValue) or CoC on initValue() |\n`;
+  out += `| React when a user changes a field | CoC on modifiedField() (NOT initValue) |\n`;
   out += `| Modify business logic | Chain of Command (CoC) |\n`;
   out += `| Send notification to external system | Business Event |\n`;
   out += `| Receive/import external data | Data Entity (OData/DMF) |\n`;
