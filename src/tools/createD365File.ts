@@ -3716,15 +3716,29 @@ export async function handleCreateD365File(
         basePath = customWritePath || args.packagePath || configPackagePath || fallbackPackagePath();
       }
     } else {
-      // Traditional mode: assume package == model.
-      // Prefer the custom write root over D365FO_PACKAGE_PATH so custom model
-      // XML lands in the repo working tree rather than the MS PackagesLocalDirectory.
-      resolvedPackageName = actualModelName;
-      basePath =
-        args.packagePath ||
-        customWritePath ||
-        configPackagePath ||
-        fallbackPackagePath();
+      // Traditional mode: try descriptor-based resolution first so a package
+      // whose name differs from the model name (e.g. package "ISVPackage",
+      // model "ISV Package") resolves correctly without an explicit packageName
+      // arg. Scan both the custom write root and D365FO_PACKAGE_PATH for the
+      // matching descriptor; fall back to assuming package == model otherwise.
+      const roots = [customWritePath, configPackagePath].filter(Boolean) as string[];
+      const resolver = new PackageResolver(roots);
+      const resolved = roots.length ? await resolver.resolve(actualModelName) : null;
+
+      if (resolved) {
+        resolvedPackageName = resolved.packageName;
+        basePath = resolved.rootPath;
+      } else {
+        // Fallback: assume package == model.
+        // Prefer the custom write root over D365FO_PACKAGE_PATH so custom model
+        // XML lands in the repo working tree rather than the MS PackagesLocalDirectory.
+        resolvedPackageName = actualModelName;
+        basePath =
+          args.packagePath ||
+          customWritePath ||
+          configPackagePath ||
+          fallbackPackagePath();
+      }
     }
 
     console.error(
