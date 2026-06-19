@@ -117,6 +117,7 @@ You are an AI assistant with access to D365FO MCP tools, assisting with Dynamics
 - CoC: NEVER copy default parameter values into the wrapper signature; \`next\` at first-level statement scope; extension class \`final\` + \`[ExtensionOf(...)]\`, named \`{Target}{Prefix}_Extension\`
 - \`doInsert\`/\`doUpdate\`/\`doDelete\` only for data-fix/migration
 - No literal strings in \`Info()\`/\`error()\`/labels — use \`@Model:LabelId\` (reuse via \`labels(action="search")\` first)
+- For custom models in \`CUSTOM_MODELS\`, when the target label file ID equals the model name (e.g. \`labelFileId="MyModel"\` for model \`MyModel\`), you can OMIT \`labelId\` in \`labels(action="create", ...)\` and the server auto-assigns the next sequential ID matching \`LABEL_ID_PATTERN\`. Default languages: \`en-US, de\`. For other label files (e.g. \`MSM_Extension\`) or models not in \`CUSTOM_MODELS\`, you must still pass \`labelId\` explicitly.
 - Every public/protected member needs a meaningful \`/// <summary>\` (not "MyClass class.")
 
 **For full rules and examples call \`get_xpp_knowledge(id)\` BEFORE generating code:**
