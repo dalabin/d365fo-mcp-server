@@ -1080,6 +1080,13 @@ describe('create_label — auto-generated labelId', () => {
     else process.env.LABEL_ID_PATTERN = originalPattern;
     if (originalDigits === undefined) delete process.env.LABEL_ID_DIGITS;
     else process.env.LABEL_ID_DIGITS = originalDigits;
+
+    vi.mocked(fs.promises.readdir).mockReset();
+    vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    vi.mocked(fs.promises.readFile).mockReset();
+    vi.mocked(fs.promises.readFile).mockResolvedValue(
+      '; Label file\nMyExistingLabel=Existing label text\n' as any,
+    );
   });
 
   it('rejects when labelId omitted and LABEL_ID_PATTERN is not set', async () => {
