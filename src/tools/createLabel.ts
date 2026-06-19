@@ -39,12 +39,17 @@ const CreateLabelArgsSchema = z.object({
   labelId: z
     .string()
     .regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Label ID must be alphanumeric (no spaces)')
+    .optional()
     .describe(
       'Label identifier — must be unique within the label file. ' +
       '⛔ NEVER add a model/object prefix to label IDs. ' +
       'Label IDs describe the meaning of the text, NOT the owning object. ' +
       'Good examples: "CustomerName", "InvoiceDate", "ErrorAmountNegative". ' +
-      'Bad examples (with prefix): "MyModelCustomerName", "ContosoExtInvoiceDate".',
+      'Bad examples (with prefix): "MyModelCustomerName", "ContosoExtInvoiceDate". ' +
+      'Optional when the target label file is the main label file of a model in CUSTOM_MODELS ' +
+      'AND LABEL_ID_PATTERN is set — the server then auto-assigns the next sequential ID ' +
+      'matching the pattern (e.g. for LABEL_ID_PATTERN="XX" with N total digits, the next ID is "XX"+N digits). ' +
+      'Always required otherwise.',
     ),
   labelFileId: z
     .string()
@@ -138,6 +143,113 @@ const CreateLabelArgsSchema = z.object({
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// ── Auto-generated label ID helpers ───────────────────────────────────────────
+
+/** Parse CUSTOM_MODELS env var (comma-separated) into a Set of trimmed names. */
+function getCustomModels(): Set<string> {
+  const raw = process.env.CUSTOM_MODELS ?? '';
+  return new Set(raw.split(',').map(m => m.trim()).filter(Boolean));
+}
+
+/** Get the auto-numbering pattern prefix from env. Empty = disabled. */
+function getLabelIdPattern(): string {
+  return (process.env.LABEL_ID_PATTERN ?? '').trim();
+}
+
+/** Get the total length of an auto-generated label ID. Default 7 (pattern prefix + 4 digits). */
+function getLabelIdDigits(): number {
+  const raw = parseInt(process.env.LABEL_ID_DIGITS ?? '7', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 7;
+}
+
+/**
+ * Returns true when labelId should be auto-generated for this call:
+ *  - LABEL_ID_PATTERN is set in env
+ *  - model is in CUSTOM_MODELS
+ *  - labelFileId equals the model name (i.e. the main label file of the model —
+ *    extensions like MSM_Extension.* are skipped)
+ */
+export function shouldAutoGenerateLabelId(
+  labelFileId: string,
+  model: string,
+): boolean {
+  if (!getLabelIdPattern()) return false;
+  if (!labelFileId || labelFileId !== model) return false;
+  return getCustomModels().has(model);
+}
+
+/**
+ * Scan the on-disk label file for label IDs matching the configured pattern and
+ * return the next available ID. Scans the first available language folder
+ * (preferred: en-US, else de) — the existing IDs are identical across all
+ * language files for a given label file ID, so scanning one is enough.
+ *
+ * Returns null when no existing ID matches the pattern (caller starts at 1).
+ */
+export async function generateNextLabelId(
+  labelFileId: string,
+  resolvedPackagePath: string,
+  resolvedPackageName: string,
+  model: string,
+): Promise<string | null> {
+  const pattern = getLabelIdPattern();
+  const digits = getLabelIdDigits();
+  if (!pattern) return null;
+
+  const labelResourcesDir = path.join(
+    resolvedPackagePath, resolvedPackageName, model, 'AxLabelFile', 'LabelResources',
+  );
+
+  // Pick a language folder that actually has the file. en-US first, then de,
+  // then any other. Scanning one is sufficient because IDs are shared across
+  // language variants of the same label file.
+  const preferredLangs = ['en-US', 'de'];
+  let discovered: string[] = [];
+  try {
+    discovered = await fs.readdir(labelResourcesDir);
+  } catch {
+    return null;
+  }
+  const lowerDiscovered = new Map(discovered.map(l => [l.toLowerCase(), l]));
+  let chosen: string | null = null;
+  for (const pref of preferredLangs) {
+    if (lowerDiscovered.has(pref.toLowerCase())) {
+      chosen = lowerDiscovered.get(pref.toLowerCase())!;
+      break;
+    }
+  }
+  if (!chosen && discovered.length > 0) chosen = discovered[0];
+  if (!chosen) return null;
+
+  const txtPath = path.join(labelResourcesDir, chosen, `${labelFileId}.${chosen}.label.txt`);
+  let content = '';
+  try {
+    content = await fs.readFile(txtPath, 'utf-8');
+  } catch {
+    return null;
+  }
+
+  // Strip UTF-8 BOM (U+FEFF) at the start of the first line so the regex
+  // anchors cleanly to the file content. D365FO .label.txt files start with
+  // a BOM — without this, the first label ID is invisible to the matcher.
+  const stripped = content.replace(/^\uFEFF/, '');
+  const escapedPrefix = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Match the label ID at the start of a "id=text" line, then ignore the rest of the line.
+  // (Comment lines start with ';' and are skipped naturally.)
+  const re = new RegExp(`^${escapedPrefix}(\\d+)(?==)`);
+  let max = -1;
+  for (const line of stripped.replace(/\r\n/g, '\n').split('\n')) {
+    const m = line.match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+  }
+  if (max < 0) return null;
+  const next = max + 1;
+  return `${pattern}${String(next).padStart(digits - pattern.length, '0')}`;
+}
 
 /** Parse a .label.txt file into an ordered map: labelId → { text, comment } */
 function parseLabelMap(content: string): Map<string, { text: string; comment?: string }> {
@@ -277,7 +389,7 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       normalizeCreateLabelArgs(request.params.arguments),
     );
     const {
-      labelId,
+      labelId: labelIdArg,
       labelFileId,
       model,
       translations,
@@ -287,6 +399,7 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       createLabelFileIfMissing,
       updateIndex,
     } = args;
+    let labelId = labelIdArg;
 
     // Guard: never create new labels in a label file EXTENSION (e.g. "Base_Extension").
     // Extensions only extend a base label file owned by another model — new labels
@@ -412,6 +525,60 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
     const axLabelDir = path.join(modelDir, 'AxLabelFile');
     const labelResourcesDir = path.join(axLabelDir, 'LabelResources');
 
+    // ── Auto-generate labelId when omitted and conditions match ──────────────
+    // Activated when LABEL_ID_PATTERN is set, the model is in CUSTOM_MODELS, and
+    // the target label file ID equals the model name (i.e. the model's main label
+    // file — extension label files like MSM_Extension.* are skipped).
+    if (!labelId && shouldAutoGenerateLabelId(labelFileId, model)) {
+      let attempts = 0;
+      // Re-scan up to 5 times in case of an off-by-one collision between the
+      // on-disk max and a freshly-created file. In practice one scan suffices.
+      while (attempts++ < 5) {
+        const candidate = await generateNextLabelId(
+          labelFileId, resolvedPackagePath, resolvedPackageName, model,
+        );
+        if (!candidate) {
+          // No prior IDs matching the configured pattern — start at the pattern + "1",
+          // zero-padded to the configured LABEL_ID_DIGITS total length.
+          const pattern = getLabelIdPattern();
+          const digits = getLabelIdDigits();
+          labelId = `${pattern}${'1'.padStart(digits - pattern.length, '0')}`;
+          break;
+        }
+        // Verify the candidate is not already present (case-insensitive).
+        const exists = symbolIndex.labelsDb
+          .prepare(`SELECT 1 FROM labels WHERE label_id = ? AND label_file_id = ? LIMIT 1`)
+          .get(candidate, labelFileId);
+        if (!exists) {
+          labelId = candidate;
+          break;
+        }
+        // Collision: very unlikely; loop and re-scan to get a higher number.
+      }
+      if (!labelId) {
+        return {
+          content: [{ type: 'text', text: 'Error creating label: failed to auto-generate a unique label ID after 5 attempts' }],
+          isError: true,
+        };
+      }
+    }
+
+    // labelId is now guaranteed to be set (either by the caller or by auto-gen).
+    if (!labelId) {
+      return {
+        content: [{
+          type: 'text',
+          text:
+            'Missing required argument: "labelId".\n' +
+            `For label file "${labelFileId}" in model "${model}", provide a unique alphanumeric ` +
+            'identifier (e.g. "CustomerName").\n' +
+            'If this is the main label file of a model in CUSTOM_MODELS and LABEL_ID_PATTERN is ' +
+            'set, you can OMIT labelId and the server will auto-assign the next sequential ID.',
+        }],
+        isError: true,
+      };
+    }
+
     // Build a quick lookup: language → translation entry
     const translationMap = new Map<string, { text: string; comment?: string }>();
     for (const tr of translations) {
@@ -422,7 +589,11 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
     // 2. Discover the language folders that already exist in the model.
     //    NOTE: LabelResources/ is shared by EVERY label file in the model, so this lists
     //    locales owned by sibling label files too. The `languages` arg scopes the writes.
-    const requestedLanguages = (args.languages ?? [])
+    //    When auto-generating an ID for a custom model, default to en-US + de unless the
+    //    caller explicitly listed languages — this keeps the new entry in the same locale
+    //    set the rest of the model uses.
+    const autoGen = !labelIdArg && shouldAutoGenerateLabelId(labelFileId, model);
+    const requestedLanguages = (args.languages ?? (autoGen ? ['en-US', 'de'] : []))
       .map(l => l.trim())
       .filter(Boolean);
 
