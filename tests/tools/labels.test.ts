@@ -10,6 +10,7 @@ import { createLabelTool } from '../../src/tools/createLabel';
 import { renameLabelTool } from '../../src/tools/renameLabel';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
+import * as fs from 'fs';
 
 // Mock filesystem access — label tools write to disk
 vi.mock('fs', async (orig) => {
@@ -1052,6 +1053,163 @@ describe('create_label', () => {
     expect(labelWrite).toBeDefined();
     // New D365FO label files default to CRLF (Windows-native, matches TFVC defaults)
     expect(labelWrite!.content).toContain('BrandNew=Brand new label\r\n');
+  });
+});
+
+// ─── create_label — auto-generated label IDs (driven by env vars) ────────────
+//
+// The exact prefix (e.g. "XX") is supplied at runtime via LABEL_ID_PATTERN —
+// the tests use a neutral "XX" placeholder so they never depend on a specific
+// project code. The numeric part is always derived from the on-disk label
+// file (max + 1) when the file is non-empty, else starts at 1.
+
+describe('create_label — auto-generated labelId', () => {
+  const originalCustomModels = process.env.CUSTOM_MODELS;
+  const originalPattern = process.env.LABEL_ID_PATTERN;
+  const originalDigits = process.env.LABEL_ID_DIGITS;
+
+  beforeEach(() => {
+    process.env.CUSTOM_MODELS = 'MyModel';
+    process.env.LABEL_ID_PATTERN = 'XX';
+    process.env.LABEL_ID_DIGITS = '9';
+  });
+  afterEach(() => {
+    if (originalCustomModels === undefined) delete process.env.CUSTOM_MODELS;
+    else process.env.CUSTOM_MODELS = originalCustomModels;
+    if (originalPattern === undefined) delete process.env.LABEL_ID_PATTERN;
+    else process.env.LABEL_ID_PATTERN = originalPattern;
+    if (originalDigits === undefined) delete process.env.LABEL_ID_DIGITS;
+    else process.env.LABEL_ID_DIGITS = originalDigits;
+  });
+
+  it('rejects when labelId omitted and LABEL_ID_PATTERN is not set', async () => {
+    delete process.env.LABEL_ID_PATTERN;
+    const ctx = buildContext();
+    const result = await createLabelTool(
+      req('create_label', {
+        // no labelId
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'No pattern' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Missing required argument: "labelId"/);
+  });
+
+  it('rejects when labelId omitted and model is not in CUSTOM_MODELS', async () => {
+    process.env.CUSTOM_MODELS = 'OtherModel';
+    const ctx = buildContext();
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Wrong model' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Missing required argument: "labelId"/);
+  });
+
+  it('rejects when labelId omitted and labelFileId differs from model (extension label file)', async () => {
+    const ctx = buildContext();
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MSM_Extension',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Wrong file' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Missing required argument: "labelId"/);
+  });
+
+  it('auto-generates next ID when labelId omitted and all conditions match', async () => {
+    // Mock on-disk read returns a label file with a max XX* ID of 000490
+    vi.mocked(fs.promises.readFile).mockResolvedValue(
+      '\uFEFFXX000490=Last existing\nXX000489=Second last\nFoo=Some other\n' as any,
+    );
+    vi.mocked(fs.promises.readdir).mockResolvedValue(['en-US', 'de'] as any);
+
+    const ctx = buildContext();
+    (ctx.symbolIndex as any).labelsDb = {
+      prepare: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+    };
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [
+          { language: 'en-US', text: 'Auto gen test' },
+          { language: 'de', text: 'Auto-Gen-Test' },
+        ],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    // digits=9, prefix=XX → number part = 7 digits. Max is 0000490, next is 0000491.
+    expect(result.content[0].text).toContain('XX0000491');
+  });
+
+  it('starts at the first sequential ID when no prior pattern-matching IDs exist on disk', async () => {
+    vi.mocked(fs.promises.readFile).mockResolvedValue(
+      '; Label file\nMyOtherLabel=Hello\n' as any,
+    );
+    vi.mocked(fs.promises.readdir).mockResolvedValue(['en-US'] as any);
+    const ctx = buildContext();
+    (ctx.symbolIndex as any).labelsDb = {
+      prepare: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+    };
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'First' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    // digits=9, prefix=XX → number part = 7 digits → first ID is XX0000001.
+    expect(result.content[0].text).toContain('XX0000001');
+  });
+
+  it('respects LABEL_ID_DIGITS for zero-padding (e.g. 5 → XX01)', async () => {
+    process.env.LABEL_ID_DIGITS = '5';
+    vi.mocked(fs.promises.readFile).mockResolvedValue('' as any);
+    vi.mocked(fs.promises.readdir).mockResolvedValue(['en-US'] as any);
+    const ctx = buildContext();
+    (ctx.symbolIndex as any).labelsDb = {
+      prepare: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+    };
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Five digits' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    // digits=5, pattern=XX → 3 zero-padded digits → XX001 (5 chars total)
+    expect(result.content[0].text).toContain('XX001');
   });
 });
 
