@@ -1204,11 +1204,15 @@ describe('create_label — auto-generated labelId', () => {
     expect(result.content[0].text).toMatch(/Missing required argument: "labelId"/);
   });
 
-  it('rejects when labelId omitted and labelFileId differs from model (extension label file)', async () => {
+  it('rejects when labelId omitted and labelFileId differs from model', async () => {
     const ctx = buildContext();
     const result = await createLabelTool(
       req('create_label', {
-        labelFileId: 'MSM_Extension',
+        // Use a labelFileId that is NOT an extension marker so the
+        // isExtensionLabelFile guard at src/tools/createLabel.ts:408 does not
+        // short-circuit this branch. The test exercises shouldAutoGenerateLabelId's
+        // own labelFileId !== model check, not the EXTENSION guard.
+        labelFileId: 'OtherLabelFile',
         model: 'MyModel',
         createLabelFileIfMissing: true,
         updateIndex: false,
