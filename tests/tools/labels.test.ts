@@ -1303,6 +1303,101 @@ describe('create_label — auto-generated labelId', () => {
     // digits=5, pattern=XX → 3 zero-padded digits → XX001 (5 chars total)
     expect(result.content[0].text).toContain('XX001');
   });
+
+  it('places auto-generated ID in numeric order among existing numeric IDs (cross-rollover)', async () => {
+    // Existing file has XX1..XX9 (single-digit numbers, 3 chars each).
+    // Auto-gen produces XX10 (the 10th sequential ID, 4 chars). Pure lex sort
+    // would put XX10 in position #2 (because 'XX1' is a prefix of 'XX10');
+    // ordinal-numeric sort must place it AFTER XX9.
+    const fsMock = await import('fs');
+    const writeCalls: Array<{ path: string; content: string }> = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writeCalls.push({ path: p, content });
+    });
+
+    process.env.LABEL_ID_DIGITS = '3';
+    vi.mocked(fs.promises.readFile).mockResolvedValue(
+      '\uFEFFXX1=First\nXX2=Second\nXX3=Third\nXX4=Fourth\nXX5=Fifth\nXX6=Sixth\nXX7=Seventh\nXX8=Eighth\nXX9=Ninth\n' as any,
+    );
+    vi.mocked(fs.promises.readdir).mockResolvedValue(['en-US'] as any);
+
+    const ctx = buildContext();
+    (ctx.symbolIndex as any).labelsDb = {
+      prepare: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+    };
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Tenth' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.path.endsWith('.label.txt'));
+    expect(labelWrite).toBeDefined();
+    const body = labelWrite!.content.replace(/^\uFEFF/, '');
+    const lines = body.replace(/\r\n/g, '\n').split('\n').filter(l => l && !l.startsWith(';') && !l.startsWith(' '));
+    const indices = {
+      XX1: lines.findIndex(l => l.startsWith('XX1=')),
+      XX9: lines.findIndex(l => l.startsWith('XX9=')),
+      XX10: lines.findIndex(l => l.startsWith('XX10=')),
+    };
+    expect(indices.XX1).toBeLessThan(indices.XX9);
+    expect(indices.XX9).toBeLessThan(indices.XX10);
+  });
+
+  it('places auto-generated ID in numeric order when existing IDs are narrower than the configured digit width', async () => {
+    // Existing file has 8-char IDs (XX000488, XX000489, XX000490), no leading zero.
+    // Auto-gen produces XX0000491 (9 chars, leading zero per LABEL_ID_DIGITS=9).
+    // Pure lex sort puts XX0000491 BEFORE XX000488 because at position 5 the
+    // char '0' (0x30) is less than '4' (0x34) — even though 491 > 490 numerically.
+    const fsMock = await import('fs');
+    const writeCalls: Array<{ path: string; content: string }> = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writeCalls.push({ path: p, content });
+    });
+
+    vi.mocked(fs.promises.readFile).mockResolvedValue(
+      '\uFEFFXX000488=Three back\nXX000489=Two back\nXX000490=Last existing\nFoo=Non-numeric\n' as any,
+    );
+    vi.mocked(fs.promises.readdir).mockResolvedValue(['en-US'] as any);
+
+    const ctx = buildContext();
+    (ctx.symbolIndex as any).labelsDb = {
+      prepare: vi.fn(() => ({ get: vi.fn(() => undefined) })),
+    };
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        createLabelFileIfMissing: true,
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Auto gen test' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    const labelWrite = writeCalls.find(c => c.path.endsWith('.label.txt'));
+    expect(labelWrite).toBeDefined();
+    const body = labelWrite!.content.replace(/^\uFEFF/, '');
+    const lines = body.replace(/\r\n/g, '\n').split('\n').filter(l => l && !l.startsWith(';') && !l.startsWith(' '));
+    const indices = {
+      Foo: lines.findIndex(l => l.startsWith('Foo=')),
+      xx488: lines.findIndex(l => l.startsWith('XX000488=')),
+      xx489: lines.findIndex(l => l.startsWith('XX000489=')),
+      xx490: lines.findIndex(l => l.startsWith('XX000490=')),
+      xx491: lines.findIndex(l => l.startsWith('XX0000491=')),
+    };
+    expect(indices.Foo).toBeLessThan(indices.xx488);
+    expect(indices.xx488).toBeLessThan(indices.xx489);
+    expect(indices.xx489).toBeLessThan(indices.xx490);
+    expect(indices.xx490).toBeLessThan(indices.xx491);
+  });
 });
 
 // ─── rename_label ────────────────────────────────────────────────────────────

@@ -296,8 +296,20 @@ function parseLabelMap(content: string): Map<string, { text: string; comment?: s
  *  Matches Visual Studio's ordering of .label.txt entries, where `_` (0x5F) sorts
  *  AFTER all letters. A locale-aware comparer (e.g. localeCompare) instead sorts `_`
  *  BEFORE letters, which shuffles `word_`-prefixed IDs on every write and produces
- *  spurious git diffs. Equivalent to .NET's StringComparer.OrdinalIgnoreCase. */
+ *  spurious git diffs. Equivalent to .NET's StringComparer.OrdinalIgnoreCase
+ *  — EXCEPT when both IDs share a text prefix and end in digits: in that case the
+ *  trailing number is compared as an integer so XX9 < XX10 < XX100 and a 9-char
+ *  ID like XX0000491 sorts AFTER an 8-char ID like XX000490 (numerically, not
+ *  lexicographically by raw byte length). */
 function compareLabelIdsOrdinalCI(a: string, b: string): number {
+  const re = /^(.*?)(\d+)$/;
+  const ma = re.exec(a);
+  const mb = re.exec(b);
+  if (ma && mb && ma[1].length > 0 && ma[1] === mb[1]) {
+    const na = Number(ma[2]);
+    const nb = Number(mb[2]);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  }
   const ua = a.toUpperCase();
   const ub = b.toUpperCase();
   return ua < ub ? -1 : ua > ub ? 1 : 0;
