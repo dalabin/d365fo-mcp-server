@@ -72,6 +72,50 @@ export function decodeXmlEntitiesFromXppSource(source: string): string {
 }
 
 /**
+ * Reject an X++ source payload that smuggles XML/CDATA structure.
+ *
+ * Method source written through the bridge is handed verbatim to the D365FO SDK
+ * serializer, which wraps it in `<![CDATA[ … ]]>` and emits the surrounding
+ * `<Method>…</Method>` markup itself. If the caller's source already contains
+ * the CDATA terminator `]]>` or closing metadata tags, the serializer writes
+ * them inside the CDATA block unchanged — producing structurally invalid XML:
+ * a premature/doubled `]]>` and a stray `<Method>` that drops the enclosing
+ * `</Method>` (exactly the corruption D365FO refuses to deserialize). The
+ * direct-XML replace fallback has the same exposure: a literal string replace
+ * that injects `]]>` into an existing CDATA block corrupts it too.
+ *
+ * This always means the AI passed a slice of the .xml file where clean X++ was
+ * expected. Reject it here — before it reaches disk — with an actionable
+ * message, rather than silently escaping and hiding the mistake.
+ *
+ * X++ legitimately uses `<`/`>` (generics, comparisons, doc comments), so we
+ * only flag the CDATA terminator and the specific opening/closing metadata
+ * tokens, never bare angle brackets.
+ */
+export function assertCleanXppSource(source: string | undefined, paramName: string): void {
+  if (!source) return;
+
+  if (source.includes(']]>')) {
+    throw new Error(
+      `⛔ ${paramName} contains the CDATA terminator "]]>" — that is XML, not clean X++ source.\n\n` +
+      `Method source is wrapped in <![CDATA[ … ]]> by the metadata serializer, so a "]]>" inside it ` +
+      `breaks the CDATA block and yields invalid XML (doubled "]]>" plus a dropped </Method>), which ` +
+      `D365FO refuses to load.\n\n` +
+      `Pass ONLY the X++ code — no <Source>, <![CDATA[, ]]> or </Method> markup. The tool adds the wrapping itself.`
+    );
+  }
+
+  const structuralTag = source.match(/<\/(?:Source|Methods?)>|<Method>|<!\[CDATA\[/);
+  if (structuralTag) {
+    throw new Error(
+      `⛔ ${paramName} contains the XML metadata token "${structuralTag[0]}" — that is XML, not clean X++ source.\n\n` +
+      `You pasted a slice of the .xml file. Pass ONLY the X++ code — the tool emits the ` +
+      `<Method>, <Source> and <![CDATA[ … ]]> wrapping itself.`
+    );
+  }
+}
+
+/**
  * Direct XML file-level replace-code fallback.
  * Used when the C# bridge fails or returns null for replace-code on forms/form-extensions
  * (e.g. control override methods that the SDK doesn't expose via the Methods API).
@@ -412,6 +456,15 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       `d365fo_file(action="modify", objectType="${args.objectType}", objectName="${args.objectName}", operation="${args.operation}")`,
     );
     if (referenceError) return referenceError;
+
+    // CDATA-corruption guard: any X++ payload that will be CDATA-wrapped by the
+    // serializer (add-method's source) or spliced into an existing CDATA block
+    // (replace-code's newCode) must be clean X++ — never a slice of .xml markup.
+    // A "]]>" or stray <Method>/<Source> in the payload otherwise survives into
+    // the file and produces the invalid doubled-"]]>" / dropped-</Method> shape.
+    assertCleanXppSource(args.sourceCode, 'sourceCode');
+    assertCleanXppSource((args as any).methodCode, 'methodCode');
+    assertCleanXppSource(args.newCode, 'newCode');
 
     const { symbolIndex } = context;
     const {
