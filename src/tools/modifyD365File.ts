@@ -1137,12 +1137,39 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       };
       const isProvided = (p: string) =>
         (args as any)[p] !== undefined || (aliases[p] ?? []).some(a => (args as any)[a] !== undefined);
-      const missingList = required.filter(p => !isProvided(p)).map(p => `  ⛔ ${p}: MISSING`);
-      const providedList = required.filter(p => isProvided(p)).map(p => `  ✅ ${p}: provided`);
+      const missing = required.filter(p => !isProvided(p));
+
+      // Two distinct causes produce a null bridge result; pick the message that
+      // matches reality instead of always blaming missing parameters.
+      if (missing.length > 0) {
+        const missingList = missing.map(p => `  ⛔ ${p}: MISSING`);
+        const providedList = required.filter(isProvided).map(p => `  ✅ ${p}: provided`);
+        throw new Error(
+          `Bridge operation '${operation}' returned null — required parameters are missing.\n` +
+          `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
+          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+        );
+      }
+
+      // All required params were supplied, yet the bridge returned null. The
+      // cause is object resolution: the C# bridge could not find '${objectName}'
+      // in its metadata model. This is common right after creating the object —
+      // the bridge resolves objects through fixed roots configured at startup
+      // and does not see files written since, so a just-created object is not
+      // yet in its model.
       throw new Error(
-        `Bridge operation '${operation}' returned null — required parameters may be missing.\n` +
-        `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
-        `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+        `Bridge operation '${operation}' returned null even though all required parameters ` +
+        `(${required.join(', ') || 'none'}) were provided.\n` +
+        `Most likely cause: the C# metadata bridge could not resolve ${objectType} '${objectName}'.\n` +
+        `This is typical right after creating an object — the bridge's metadata roots are fixed at ` +
+        `startup, so an object written this session may not be in its model yet.\n` +
+        `Try, in order:\n` +
+        `  1. Refresh the bridge's view of the new object: update_symbol_index({ filePath: "<path to ${objectName}.xml>" }).\n` +
+        `  2. Ensure the model is under the bridge's roots — set context.customPackagesPath / ` +
+        `D365FO_CUSTOM_PACKAGES_PATH to the metadata folder, or pass an explicit filePath to this call.\n` +
+        `  3. Confirm ${objectName}.xml actually exists on disk under those roots.\n` +
+        (actualFilePath ? `Resolved file path: ${actualFilePath}\n` : '') +
+        `If none of these apply, the object may simply not exist or its name may be misspelled.`
       );
     }
     if (!bridgeResult.success) {

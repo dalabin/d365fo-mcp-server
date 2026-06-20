@@ -2147,16 +2147,51 @@ function scoreEntry(entry: KnowledgeEntry, queryTokens: string[]): number {
   return score;
 }
 
-function searchKnowledge(topic: string): KnowledgeEntry[] {
-  const tokens = topic
+/**
+ * Tokenize a topic query. Splits on whitespace/comma/semicolon/slash, then for
+ * every token that itself contains a hyphen or underscore ALSO emits the split
+ * sub-words. The original (joined) token is kept so entry-ID matches like
+ * `set-based` still hit `entry.id === token`, while hyphenated multi-word
+ * queries like `number-sequence` also match word-level keywords/titles (which
+ * store the words separated by spaces, e.g. keyword "number sequence").
+ */
+function tokenize(topic: string): string[] {
+  const base = topic
     .toLowerCase()
     .replace(/[^a-z0-9áčďéěíňóřšťúůýž_\-/\s]/g, '')
     .split(/[\s,;/]+/)
     .filter(t => t.length > 1);
 
+  const out = new Set<string>();
+  for (const tok of base) {
+    out.add(tok);
+    if (tok.includes('-') || tok.includes('_')) {
+      for (const part of tok.split(/[-_]+/).filter(p => p.length > 1)) {
+        out.add(part);
+      }
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Minimum top score for a query to count as a confident match. A score below
+ * this means no title/keyword/ID hit landed — only incidental summary-substring
+ * overlap (1–2 pts) — so the results are surfaced as low-confidence suggestions
+ * rather than authoritative answers. Without this floor, `number-sequence`
+ * silently returned Electronic Reporting docs (the nearest substring hit).
+ */
+const CONFIDENT_SCORE = 3;
+
+function searchKnowledge(topic: string): { entries: KnowledgeEntry[]; topScore: number } {
+  const tokens = tokenize(topic);
+
   if (tokens.length === 0) {
     // Return all entries sorted alphabetically
-    return [...KNOWLEDGE_BASE].sort((a, b) => a.title.localeCompare(b.title));
+    return {
+      entries: [...KNOWLEDGE_BASE].sort((a, b) => a.title.localeCompare(b.title)),
+      topScore: 0,
+    };
   }
 
   const scored = KNOWLEDGE_BASE
@@ -2164,7 +2199,10 @@ function searchKnowledge(topic: string): KnowledgeEntry[] {
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  return scored.map(s => s.entry);
+  return {
+    entries: scored.map(s => s.entry),
+    topScore: scored.length > 0 ? scored[0].score : 0,
+  };
 }
 
 // ─── Formatters ─────────────────────────────────────────────────────────────
@@ -2263,7 +2301,7 @@ function formatDetailed(entries: KnowledgeEntry[]): string {
 export async function xppKnowledgeTool(request: CallToolRequest) {
   try {
     const args = XppKnowledgeArgsSchema.parse(request.params.arguments);
-    const entries = searchKnowledge(args.topic);
+    const { entries, topScore } = searchKnowledge(args.topic);
 
     // Empty topic → compact table of contents listing ALL entries
     const isListAll = args.topic.trim() === '';
@@ -2277,6 +2315,16 @@ export async function xppKnowledgeTool(request: CallToolRequest) {
       formatted = args.format === 'detailed'
         ? formatDetailed(entries)
         : formatConcise(entries);
+
+      // Low-confidence guard: when something matched but only weakly (incidental
+      // substring overlap, no title/keyword/ID hit), warn so the caller doesn't
+      // treat unrelated content as authoritative.
+      if (entries.length > 0 && topScore < CONFIDENT_SCORE) {
+        formatted =
+          `⚠️ No strong match for "${args.topic}" — showing the closest entries below, which may be ` +
+          `unrelated. Browse the full list with \`get_knowledge(kind="knowledge")\` and an empty topic, ` +
+          `or refine your query.\n\n${formatted}`;
+      }
     }
 
     return {

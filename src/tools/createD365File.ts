@@ -16,6 +16,7 @@ import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
 import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject } from '../bridge/index.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnFormPatternErrors } from './validateFormPattern.js';
+import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
@@ -764,59 +765,39 @@ ${enumValuesXml}${isExtensibleXml}</AxEnum>
   }
 
   /**
-   * Generate AxForm XML structure (based on real D365FO form structure)
+   * Generate AxForm XML for a new form from a pattern template.
+   *
+   * Delegates to the pattern-compliant {@link FormPatternTemplates} builders so
+   * the generated skeleton actually satisfies the form-pattern gate. The old
+   * inline skeleton declared a `<Pattern>` over empty `<Controls />`, which the
+   * gate rejected as FP003 (required Grid/ActionPane missing) for every pattern
+   * — and worse, defaulted to a `DetailsTransaction` pattern even when the
+   * caller asked for a `SimpleList` template, guaranteeing a mismatch block.
+   *
+   * Pattern resolution: callers may express the intent as either `pattern`
+   * (the design pattern) or `formTemplate` (the VS template name); both are
+   * fuzzy strings normalized to a canonical pattern. When neither is given we
+   * default to SimpleList — the most common shape for a new setup table.
    */
   static generateAxFormXml(
     formName: string,
     properties?: Record<string, any>
   ): string {
-    const caption = properties?.caption || `@${formName}`;
-    const formTemplate = properties?.formTemplate || 'DetailsPage';
-    const pattern = properties?.pattern || 'DetailsTransaction';
-    const dataSource = properties?.dataSource || '';
-    const interactionClass = properties?.interactionClass || '';
-    const style = properties?.style || 'DetailsFormTransaction';
+    const rawPattern = properties?.pattern || properties?.formTemplate;
+    const pattern = rawPattern
+      ? FormPatternTemplates.normalizePattern(String(rawPattern))
+      : 'SimpleList';
 
-    // Build class declaration for SourceCode
-    const extendsFrom = properties?.extends || 'FormRun';
-    const classDeclaration = properties?.classDeclaration || 
-      `[Form]\npublic class ${formName} extends ${extendsFrom}\n{\n}`;
-
-    // Build optional InteractionClass
-    const interactionClassXml = interactionClass
-      ? `\t<InteractionClass>${interactionClass}</InteractionClass>\n`
-      : '';
-
-    // Build DataSource reference for Design
-    const dataSourceXml = dataSource
-      ? `\t\t<DataSource xmlns="">${dataSource}</DataSource>\n`
-      : '';
-
-    return `<?xml version="1.0" encoding="utf-8"?>
-<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
-\t<Name>${formName}</Name>
-\t<SourceCode>
-\t\t<Methods xmlns="">
-\t\t\t<Method>
-\t\t\t\t<Name>classDeclaration</Name>
-\t\t\t\t<Source><![CDATA[
-${classDeclaration}
-
-]]></Source>
-\t\t\t</Method>
-\t\t</Methods>
-\t</SourceCode>
-\t<FormTemplate>${formTemplate}</FormTemplate>
-${interactionClassXml}\t<DataSources />
-\t<Design>
-\t\t<Caption xmlns="">${caption}</Caption>
-${dataSourceXml}\t\t<Pattern xmlns="">${pattern}</Pattern>
-\t\t<Style xmlns="">${style}</Style>
-\t\t<Controls xmlns="" />
-\t</Design>
-\t<Parts />
-</AxForm>
-`;
+    return FormPatternTemplates.build(pattern, {
+      formName,
+      dsName: properties?.dataSource || undefined,
+      dsTable: properties?.dataSourceTable || properties?.dataSource || undefined,
+      caption: properties?.caption,
+      gridFields: Array.isArray(properties?.gridFields) ? properties.gridFields : undefined,
+      linesDsName: properties?.linesDataSource,
+      linesDsTable: properties?.linesDataSourceTable || properties?.linesDataSource,
+      sections: Array.isArray(properties?.sections) ? properties.sections : undefined,
+    });
   }
 
   /**

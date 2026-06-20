@@ -113,6 +113,17 @@ describe('get_xpp_knowledge', () => {
     expect(text).toContain('NumberSeq');
   });
 
+  it('resolves a hyphenated multi-word topic to the right entry', async () => {
+    // Regression: "number-sequence" used to score 0 on the number-sequences
+    // entry (keyword/title store the words space-separated) and silently
+    // returned Electronic Reporting docs as the nearest substring hit.
+    const result = await xppKnowledgeTool(req({ topic: 'number-sequence' }));
+    const text = getText(result);
+    expect(text).toContain('Number Sequences');
+    expect(text).toContain('NumberSeq');
+    expect(text).not.toContain('⚠️ No strong match');
+  });
+
   it('returns error for missing topic parameter', async () => {
     const result = await xppKnowledgeTool(req({}));
     expect(result.isError).toBe(true);
