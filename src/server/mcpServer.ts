@@ -572,13 +572,15 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 description:
                   'Additional properties by objectType:\n' +
                   '• class: extends, implements, isFinal, isAbstract\n' +
-                  '• table: label, tableGroup, tableType, titleField1/2, fields[]\n' +
+                  '• table: label, tableGroup, tableType, titleField1/2, fields[{name,type?|edt?|fieldType?,enumType?,label?,mandatory?}] — enum fields need enumType (+ optionally fieldType:"AxTableFieldEnum")\n' +
                   '• enum: label, useEnumValue, configurationKey, isExtensible, enumValues[{name,value?,label?,helpText?}]\n' +
                   '• enum-extension: enumValues[{name,label?,value?,countryRegionCodes?}]\n' +
                   '• table-extension: fields[{name,edt?,enumType?,label?,mandatory?,fieldType?}] — enum fields need fieldType:"AxTableFieldEnum" + enumType\n' +
                   '• edt: label, extends, edtType, stringSize\n' +
                   '• form: caption, formTemplate, dataSource\n' +
                   '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain)\n' +
+                  '• security-duty: label, privileges[] (privilege names — array or comma-separated)\n' +
+                  '• security-role: label, duties[] (duty names), privileges[] (privilege names)\n' +
                   '• menu-item-*: label, object, objectType\n' +
                   'Example: properties={"fields":[{"name":"ContosoStatus","enumType":"NoYes","fieldType":"AxTableFieldEnum","label":"@Contoso:Status"}]}'
               },
@@ -704,6 +706,18 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 type: 'string',
                 description: '[modify] Field label (for add-field and modify-field)'
               },
+              fieldHelpText: {
+                type: 'string',
+                description: '[modify:modify-field] Field help text.'
+              },
+              fieldEnumType: {
+                type: 'string',
+                description: '[modify:modify-field] Enum name to set on an enum-typed field.'
+              },
+              fieldStringSize: {
+                type: 'string',
+                description: '[modify:modify-field] String size to set on a string-typed field.'
+              },
               fields: {
                 type: 'array',
                 description:
@@ -768,6 +782,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                   '[modify:add-control] Control type: String (default), Integer, Real, CheckBox (NoYes/boolean), ComboBox (enums), ' +
                   'Date, DateTime, Int64, Group, Button, CommandButton, MenuFunctionButton.'
               },
+              controlLabel: {
+                type: 'string',
+                description: '[modify:add-control] Optional label for the new control.'
+              },
               positionType: {
                 type: 'string',
                 description: '[modify:add-control] Optional: AfterItem | BeforeItem. Omit to append at the end of the parent.'
@@ -776,10 +794,162 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 type: 'string',
                 description: '[modify:add-control] Name of the sibling control to position after (used with positionType=AfterItem).'
               },
+              baseFormName: {
+                type: 'string',
+                description: '[modify:add-control] Base form name for auto-resolving parentControl when the extension name does not contain it (e.g. objectName="SalesOrder.MyExt" → "SalesOrder"). Pass only when auto-detection fails.'
+              },
+              // ── action=modify: add-table-method / add-display-method ─────────
+              tableMethodType: {
+                type: 'string',
+                enum: ['find', 'exist', 'findByRecId', 'validateWrite', 'validateDelete', 'initValue'],
+                description:
+                  '[modify:add-table-method] Standard table method to auto-generate (method name is implied). ' +
+                  'find/exist also need tableKeyField. Omit and pass methodName+sourceCode for a custom method instead.'
+              },
+              tableKeyField: {
+                type: 'string',
+                description: '[modify:add-table-method] Primary key field for find/exist generation (e.g. "ItemId", "SalesId").'
+              },
+              displayMethodReturnEdt: {
+                type: 'string',
+                description: '[modify:add-display-method] EDT/type the display method returns (e.g. "Name", "AmountMST"). With methodName, auto-generates a display-method stub. Omit and pass sourceCode for a custom body.'
+              },
+              // ── action=modify: add-index / remove-index ─────────────────────
+              indexName: {
+                type: 'string',
+                description: '[modify:add-index/remove-index] Index name.'
+              },
+              indexFields: {
+                type: 'array',
+                description: '[modify:add-index] Fields that make up the index (required for add-index).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    fieldName: { type: 'string', description: 'Field name.' },
+                    direction: { type: 'string', enum: ['Asc', 'Desc'], description: 'Sort direction (optional).' },
+                  },
+                  required: ['fieldName'],
+                },
+              },
+              indexAllowDuplicates: {
+                type: 'boolean',
+                description: '[modify:add-index] Allow duplicates (default: false = unique).'
+              },
+              indexAlternateKey: {
+                type: 'boolean',
+                description: '[modify:add-index] Mark the index as an alternate key.'
+              },
+              indexEnabled: {
+                type: 'boolean',
+                description: '[modify:add-index] Whether the index is enabled (default: true).'
+              },
+              // ── action=modify: add-relation / remove-relation ───────────────
+              relationName: {
+                type: 'string',
+                description: '[modify:add-relation/remove-relation] Relation name.'
+              },
+              relatedTable: {
+                type: 'string',
+                description: '[modify:add-relation] Related (foreign key) table name.'
+              },
+              relationConstraints: {
+                type: 'array',
+                description: '[modify:add-relation] Field constraints (field = relatedField pairs).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    fieldName: { type: 'string', description: 'Local field name.' },
+                    relatedFieldName: { type: 'string', description: 'Field name in the related table.' },
+                  },
+                  required: ['fieldName', 'relatedFieldName'],
+                },
+              },
+              relationCardinality: {
+                type: 'string',
+                description: '[modify:add-relation] Local-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ZeroMore).'
+              },
+              relatedTableCardinality: {
+                type: 'string',
+                description: '[modify:add-relation] Related-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ExactlyOne).'
+              },
+              relationshipType: {
+                type: 'string',
+                description: '[modify:add-relation] Association | Composition | Aggregation | Link | Specialization (default: Association).'
+              },
+              // ── action=modify: field groups ─────────────────────────────────
+              fieldGroupName: {
+                type: 'string',
+                description: '[modify:add-field-group/remove-field-group/add-field-to-field-group] Field group name.'
+              },
+              fieldGroupFields: {
+                type: 'array',
+                description: '[modify:add-field-group] Initial field names (may be empty — add later with add-field-to-field-group).',
+                items: { type: 'string' },
+              },
+              fieldGroupLabel: {
+                type: 'string',
+                description: '[modify:add-field-group] Field group label (optional).'
+              },
+              extendBaseFieldGroup: {
+                type: 'boolean',
+                description: '[modify:add-field-to-field-group] table-extension only: true extends an existing base-table field group (<FieldGroupExtensions>); false/omitted adds to a new group defined in the extension.'
+              },
+              // ── action=modify: add-data-source (form-extension) ─────────────
+              dataSourceName: {
+                type: 'string',
+                description: '[modify:add-data-source] Data source reference name (e.g. "MyTable_1").'
+              },
+              dataSourceTable: {
+                type: 'string',
+                description: '[modify:add-data-source] Base table for the data source (e.g. "MyTable").'
+              },
+              joinSource: {
+                type: 'string',
+                description: '[modify:add-data-source] Optional existing data source on the form to join the new one to.'
+              },
+              linkType: {
+                type: 'string',
+                description: '[modify:add-data-source] Optional join/link type when joinSource is set: InnerJoin | OuterJoin | ExistJoin | NotExistJoin | Delayed | Active | Passive.'
+              },
+              // ── action=modify: enum values ──────────────────────────────────
+              enumValueName: {
+                type: 'string',
+                description: '[modify:add-enum-value/modify-enum-value/remove-enum-value] Enum value name (e.g. "Approved").'
+              },
+              enumValueLabel: {
+                type: 'string',
+                description: '[modify:add-enum-value/modify-enum-value] Label reference (e.g. "@MyModel:Approved").'
+              },
+              enumValueHelpText: {
+                type: 'string',
+                description: '[modify:add-enum-value] Help-text reference (optional).'
+              },
+              enumValueInt: {
+                type: 'number',
+                description: '[modify:add-enum-value] Explicit integer value; if omitted the next available value is assigned. With modify-enum-value, changes the integer (rare).'
+              },
+              enumValueCountryRegionCodes: {
+                type: 'string',
+                description: '[modify:add-enum-value] ISO country/region codes, comma-separated (e.g. "CZ,SK").'
+              },
+              // ── action=modify: add-menu-item-to-menu ────────────────────────
+              menuItemToAdd: {
+                type: 'string',
+                description: '[modify:add-menu-item-to-menu] Name of the menu item to add (e.g. "MyCustomForm").'
+              },
+              menuItemToAddType: {
+                type: 'string',
+                enum: ['display', 'action', 'output'],
+                description: '[modify:add-menu-item-to-menu] Menu item kind: display (form), action (class), output (report). Default: display.'
+              },
               createBackup: {
                 type: 'boolean',
                 description: '[modify] Create backup before modification (default: false)',
                 default: false
+              },
+              filePath: {
+                type: 'string',
+                description: '[modify] Absolute path to the XML file — bypasses symbol-DB lookup. Use when the object was just created and the path is known.'
               },
               workspacePath: {
                 type: 'string',
@@ -876,24 +1046,25 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             'Unified label operations — read and write. Choose an `action`:\n' +
             '• search → full-text query across indexed label files (read). Always run before action=create.\n' +
             '• info → all language translations for a labelId, OR list available label files when labelId is omitted. Pass labelFileId (without labelId) to get that label file plus the physical .label.txt path per language (read).\n' +
-            '• create → add a new label to an AxLabelFile, write into every language .label.txt, create XML descriptors if missing (write). Label IDs describe MEANING — never add a model prefix. Target the model\'s ORIGINAL label file, never a label file extension (…_Extension…).\n' +
+            '• create → add a new label to an AxLabelFile, write into every language .label.txt, create XML descriptors if missing (write). Label IDs describe MEANING — never add a model prefix. Target the model\'s ORIGINAL label file, never a label file extension (…_Extension…). Fails if the label already exists. For many labels at once pass labels:[{labelId, translations}, …] with the shared labelFileId/model at the top level — they are created in one call and reported together.\n' +
+            '• update → overwrite the text of an EXISTING label (e.g. fix a wrong/duplicate translation in cs/de). Same args as create; provide the corrected translations[] (write).\n' +
             '• rename → rename a label ID across .label.txt + X++ + XML metadata + SQLite index. Use dryRun=true first (write).',
           inputSchema: {
             type: 'object',
             properties: {
               action: {
                 type: 'string',
-                enum: ['search', 'info', 'create', 'rename'],
-                description: 'Label operation to perform.',
+                enum: ['search', 'info', 'create', 'update', 'rename', 'list-files'],
+                description: 'Label operation to perform. "list-files" is an alias of "info" (lists label files).',
               },
               // ── shared filters ─────────────────────────────────────────────
               model: {
                 type: 'string',
-                description: '[search|info|create|rename] Model that owns the label file (e.g. ContosoExt).',
+                description: '[search|info|create|update|rename] Model that owns the label file (e.g. ContosoExt).',
               },
               labelFileId: {
                 type: 'string',
-                description: '[search|info|create|rename] AxLabelFile ID (e.g. ContosoExt, SYS). For action=info with no labelId, returns the physical .label.txt path per language. For create/rename use the model\'s ORIGINAL label file, not an extension (…_Extension…).',
+                description: '[search|info|create|update|rename] AxLabelFile ID (e.g. ContosoExt, SYS). For action=info with no labelId, returns the physical .label.txt path per language. For create/update/rename use the model\'s ORIGINAL label file, not an extension (…_Extension…).',
               },
               language: {
                 type: 'string',
@@ -914,9 +1085,35 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 description: '[info] Exact label ID. Omit for action=info to list available label files for the model.',
               },
               // ── action=create ──────────────────────────────────────────────
+              labels: {
+                type: 'array',
+                description:
+                  '[create] OPTIONAL bulk mode — create several labels in one call. Each entry is { labelId, translations[], description?, defaultComment? }. ' +
+                  'Shared fields (labelFileId, model, languages, paths…) stay at the top level. When present, top-level labelId/translations are ignored. ' +
+                  'Each label is created via the normal single-label path and results are aggregated into one report (a failed entry does not abort the batch).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    labelId: { type: 'string', description: 'Label ID for this entry — alphanumeric, no model prefix.' },
+                    translations: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          language: { type: 'string', description: 'Locale code, e.g. en-US, cs, de, sk' },
+                          text: { type: 'string', description: 'Label text' },
+                          comment: { type: 'string', description: 'Developer comment (optional)' },
+                        },
+                        required: ['language', 'text'],
+                      },
+                    },
+                  },
+                  required: ['labelId', 'translations'],
+                },
+              },
               translations: {
                 type: 'array',
-                description: '[create] REQUIRED. Translations for each language. Provide at least en-US.',
+                description: '[create] REQUIRED for single-label create (omit when using labels[]). Translations for each language. Provide at least en-US.',
                 items: {
                   type: 'object',
                   properties: {
@@ -959,7 +1156,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               createLabelFileIfMissing: {
                 type: 'boolean',
-                description: '[create] Create AxLabelFile structure if missing (default: false).',
+                description: '[create] Create the AxLabelFile structure if missing (default: true). A wrong-path guard still fails loudly when the model directory is not found, so no phantom file is produced. Set false to fail fast instead.',
               },
               sortLabels: {
                 type: 'boolean',
@@ -1024,7 +1221,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               domain: {
                 type: 'string',
                 enum: ['table', 'form'],
-                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action).',
+                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action). Optional — inferred from the other params (action/pattern/xml/formName → form; tableGroup → table). Alias: patternType.',
               },
               // ── domain=table ───────────────────────────────────────────────
               tableGroup: {
@@ -1104,7 +1301,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 description: '[form/validate] Explicit path to an AxForm XML file (e.g. a freshly created form not yet indexed).',
               },
             },
-            required: ['domain'],
+            // domain is optional: objectPatternsTool infers it from the other
+            // params (and accepts the `patternType` alias). Marking it required
+            // here made clients pre-reject otherwise-valid calls.
+            required: [],
           },
         },
         {
@@ -1488,7 +1688,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               description: '[error] Optional error code (e.g. SYS10028, CSUV1, BPUpgradeCodeToday)',
             },
           },
-          required: ['kind'],
+          // kind is optional: getKnowledgeTool infers it from topic (→ knowledge)
+          // or errorText (→ error). Marking it required made clients pre-reject
+          // calls that passed only `topic`.
+          required: [],
         },
       },
       {

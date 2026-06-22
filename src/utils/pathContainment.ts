@@ -65,7 +65,7 @@ function isUnder(child: string, parent: string): boolean {
  * Order: configured package path → UDE custom packages → UDE Microsoft packages → fallback.
  * Empty/undefined entries are skipped.
  */
-async function getAllowedRoots(): Promise<string[]> {
+async function getAllowedRoots(extraRoots?: (string | null | undefined)[]): Promise<string[]> {
   const cfg = getConfigManager();
   await cfg.ensureLoaded();
   const roots = new Set<string>();
@@ -75,9 +75,28 @@ async function getAllowedRoots(): Promise<string[]> {
   try { add(await cfg.getCustomPackagesPath()); } catch { /* optional */ }
   try { add(await cfg.getMicrosoftPackagesPath()); } catch { /* optional */ }
 
+  // Caller-supplied roots (e.g. the `packagePath` tool param pointing at a repo
+  // checkout outside PackagesLocalDirectory). These are operator/agent-declared
+  // metadata roots and carry the same trust as a configured root; the canonical
+  // AOT-shape and model-hint checks below still apply to anything under them.
+  for (const r of extraRoots ?? []) add(r);
+
   // Fallback only if nothing was configured — prevents writing to unrelated drives
   // when config is silently missing (better to error out than guess).
   if (roots.size === 0) add(fallbackPackagePath());
+
+  // Broaden any *package-level* root up to its PackagesLocalDirectory base. An
+  // explicit context.packagePath may point at a single package (e.g.
+  // …/PackagesLocalDirectory/ApplicationSuite), but a custom object commonly
+  // lives in a sibling package under the same PLD. Without this, the file is
+  // found on disk yet rejected by containment because it sits beside — not
+  // under — the configured root. The PLD base IS the legitimate D365FO write
+  // boundary; the canonical-AOT-shape and standard-model guards downstream
+  // still block writes into Microsoft-owned models.
+  for (const r of [...roots]) {
+    const m = r.match(/^(.*\/PackagesLocalDirectory)(?:\/|$)/i);
+    if (m && m[1] !== r) roots.add(m[1]);
+  }
   return [...roots];
 }
 
@@ -93,6 +112,7 @@ async function getAllowedRoots(): Promise<string[]> {
 export async function assertWritePathAllowed(
   filePath: string,
   modelHint?: string,
+  opts?: { extraRoots?: (string | null | undefined)[] },
 ): Promise<PathContainmentResult> {
   if (!filePath || typeof filePath !== 'string') {
     return { ok: false, reason: 'filePath is empty' };
@@ -104,15 +124,36 @@ export async function assertWritePathAllowed(
   const canonical = normalise(filePath);
 
   // 1. Root containment
-  const roots = await getAllowedRoots();
+  const roots = await getAllowedRoots(opts?.extraRoots);
   const matchedRoot = roots.find(r => isUnder(canonical, r));
   if (!matchedRoot) {
+    // When the path still has the canonical <…>/<Package>/<Model>/Ax<Type>/<File>
+    // shape, the would-be package root is everything above <Package>. Surfacing
+    // the exact value turns a generic "configure a root" into a copy-paste fix —
+    // this is the common repo-checkout case (metadata outside PackagesLocalDirectory).
+    const segs = canonical.split('/').filter(Boolean);
+    const axIdx = segs.findIndex(s => /^Ax[A-Z]/.test(s));
+    const derivedRoot =
+      axIdx >= 3 && axIdx === segs.length - 2 ? segs.slice(0, axIdx - 2).join('/') : '';
+    const suggestion = derivedRoot
+      ? `    This object's package root looks like: ${derivedRoot}\n` +
+        `    → per call:   packagePath="${derivedRoot}"\n` +
+        `    → persistent: set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH to it (and restart).\n`
+      : `    Set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH (and restart), ` +
+        `or pass packagePath="<root that contains the model>".\n`;
     return {
       ok: false,
       reason:
         `Refusing to write outside configured D365FO package roots.\n` +
-        `  path:    ${filePath}\n` +
-        `  allowed: ${roots.join(' | ') || '(none configured)'}`,
+        // Show the *normalized* path (forward slashes, the form actually compared)
+        // so the mismatch is apples-to-apples — the raw input slashes are irrelevant,
+        // comparison is case-insensitive with separators normalized.
+        `  resolved path: ${canonical}\n` +
+        `  allowed roots:\n` +
+        (roots.length ? roots.map(r => `    - ${r}`).join('\n') : '    (none configured)') + '\n' +
+        `  → The file resolved under none of these roots (its model is not on an allowed root):\n` +
+        suggestion +
+        `    It is NOT a path-separator issue.`,
     };
   }
 
@@ -157,8 +198,12 @@ export async function assertWritePathAllowed(
 }
 
 /** Throwing wrapper — convenient in tool handlers. */
-export async function ensureWritePathAllowed(filePath: string, modelHint?: string): Promise<string> {
-  const r = await assertWritePathAllowed(filePath, modelHint);
+export async function ensureWritePathAllowed(
+  filePath: string,
+  modelHint?: string,
+  opts?: { extraRoots?: (string | null | undefined)[] },
+): Promise<string> {
+  const r = await assertWritePathAllowed(filePath, modelHint, opts);
   if (!r.ok) throw new Error(`⛔ Path containment check failed: ${r.reason}`);
   return r.canonicalPath!;
 }
@@ -187,8 +232,9 @@ export async function assertReadRootAllowed(dirPath: string): Promise<PathContai
       ok: false,
       reason:
         `Refusing to scan outside configured D365FO package roots.\n` +
-        `  path:    ${dirPath}\n` +
-        `  allowed: ${roots.join(' | ') || '(none configured)'}`,
+        `  resolved path: ${canonical}\n` +
+        `  allowed roots:\n` +
+        (roots.length ? roots.map(r => `    - ${r}`).join('\n') : '    (none configured)'),
     };
   }
 

@@ -197,6 +197,9 @@ const ModifyD365FileArgsSchema = z.object({
     'Operation to perform. ' +
     'replace-code REQUIRES parameters: oldCode (exact code to find) + newCode (replacement). ' +
     'add-method REQUIRES: methodName + sourceCode. ' +
+    'add-table-method: pass tableMethodType (find/exist/findByRecId/validateWrite/validateDelete/initValue) ' +
+    '(+ tableKeyField for find/exist) to auto-generate the method, OR methodName + sourceCode for a custom one. ' +
+    'add-display-method: pass methodName + displayMethodReturnEdt to auto-generate a stub, OR methodName + sourceCode. ' +
     'For form control override methods with replace-code, use methodName="ControlName.methodName" (e.g. "PostButton.clicked").'
   ),
 
@@ -272,6 +275,9 @@ const ModifyD365FileArgsSchema = z.object({
     'Use CheckBox for NoYes/boolean fields. Use ComboBox for enum fields. ' +
     'If omitted the tool auto-picks based on the EDT base type if controlDataField is provided.'
   ),
+  controlLabel: z.string().optional().describe(
+    'Optional label for the new control (add-control). Becomes the control <Label>.'
+  ),
   positionType: z.string().optional().describe(
     'Optional positioning: AfterItem | BeforeItem. Omit to append at the end of the parent.'
   ),
@@ -327,6 +333,9 @@ const ModifyD365FileArgsSchema = z.object({
   ),
   fieldMandatory: z.boolean().optional().describe('Is field mandatory'),
   fieldLabel: z.string().optional().describe('Field label'),
+  fieldHelpText: z.string().optional().describe('Field help text (modify-field).'),
+  fieldEnumType: z.string().optional().describe('Enum name to set on the field (modify-field, for enum-typed fields).'),
+  fieldStringSize: z.string().optional().describe('String size to set on the field (modify-field, for string-typed fields).'),
   fields: z.array(z.object({
     name: z.string(),
     edt: z.string().optional(),
@@ -376,6 +385,12 @@ const ModifyD365FileArgsSchema = z.object({
   // For add-data-source (form-extension)
   dataSourceName: z.string().optional().describe('Data source reference name for add-data-source (e.g. "MyTable_1").'),
   dataSourceTable: z.string().optional().describe('Base table name for add-data-source (e.g. "MyTable").'),
+  joinSource: z.string().optional().describe(
+    'Optional name of an existing data source on the form to join the new data source to (add-data-source).'
+  ),
+  linkType: z.string().optional().describe(
+    'Optional join/link type when joinSource is set (add-data-source): InnerJoin | OuterJoin | ExistJoin | NotExistJoin | Delayed | Active | Passive.'
+  ),
 
   // For modify-property
   propertyPath: z.string().optional().describe(
@@ -482,6 +497,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     // up the base form XML, walk the control tree, and resolve to the exact name.
     // This makes add-control seamless — no prior get_object_info(form) call required.
     let addControlNote = '';
+    let generationNote = '';
     if (operation === 'add-control' && objectType === 'form-extension' && args.parentControl) {
       const resolution = await resolveParentControl(
         objectName,
@@ -588,7 +604,11 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     // 1a. Path containment guard — every write target must live under a configured
     //     <PackagesLocalDirectory>/<Package>/<Model>/Ax<Type>/<File>.xml layout.
     //     Refuses path traversal via explicit filePath or JSON sourcePath (security-critical).
-    const containment = await assertWritePathAllowed(filePath, modelName);
+    //     A caller-supplied packagePath (metadata outside PLD, e.g. a repo checkout) is
+    //     honored as an allowed root — findD365File already resolves against it, so the
+    //     containment list must include it too or valid writes get wrongly rejected.
+    const extraRoots = args.packagePath ? [args.packagePath] : undefined;
+    const containment = await assertWritePathAllowed(filePath, modelName, { extraRoots });
     if (!containment.ok) {
       throw new Error(containment.reason || 'Path containment check failed');
     }
@@ -623,7 +643,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         const data = JSON.parse(fileContent);
         if (data.sourcePath) {
           // Re-validate the indirect path: sourcePath also comes from user-influenced data.
-          const srcContainment = await assertWritePathAllowed(data.sourcePath, modelName);
+          const srcContainment = await assertWritePathAllowed(data.sourcePath, modelName, { extraRoots });
           if (!srcContainment.ok) {
             throw new Error(`sourcePath rejected: ${srcContainment.reason}`);
           }
@@ -666,16 +686,69 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     let bridgeResult: { success: boolean; message: string } | null = null;
 
     switch (operation) {
-      case 'add-method':
-      case 'add-display-method':
-      case 'add-table-method': {
-        if (args.methodName && args.sourceCode) {
+      case 'add-method': {
+        // sourceCode and methodCode are aliases; sourceCode wins when both are set.
+        const methodSource = args.sourceCode ?? (args as any).methodCode;
+        if (args.methodName && methodSource) {
           bridgeResult = await bridgeAddMethod(
             context.bridge,
             objectType,
             objectName,
             args.methodName,
-            args.sourceCode,
+            methodSource,
+          );
+        }
+        break;
+      }
+      case 'add-display-method': {
+        // Explicit source wins; otherwise generate a stub from displayMethodReturnEdt.
+        let methodSource = args.sourceCode ?? (args as any).methodCode;
+        const methodName = args.methodName;
+        if (!methodSource && methodName && (args as any).displayMethodReturnEdt) {
+          methodSource = generateDisplayMethodSource(
+            methodName,
+            (args as any).displayMethodReturnEdt,
+          );
+          generationNote =
+            `\n\n> 🔧 Display method \`${methodName}\` generated returning ` +
+            `\`${(args as any).displayMethodReturnEdt}\` (stub — fill in the computation).`;
+        }
+        if (methodName && methodSource) {
+          bridgeResult = await bridgeAddMethod(
+            context.bridge,
+            objectType,
+            objectName,
+            methodName,
+            methodSource,
+          );
+        }
+        break;
+      }
+      case 'add-table-method': {
+        // Explicit source wins; otherwise generate from tableMethodType.
+        let methodSource = args.sourceCode ?? (args as any).methodCode;
+        let methodName = args.methodName;
+        if (!methodSource && (args as any).tableMethodType) {
+          const gen = generateTableMethodSource(
+            objectName,
+            (args as any).tableMethodType,
+            (args as any).tableKeyField,
+            symbolIndex.getReadDb(),
+          );
+          methodName = gen.methodName;
+          methodSource = gen.source;
+          generationNote =
+            `\n\n> 🔧 Table method \`${gen.methodName}\` generated from ` +
+            `tableMethodType="${(args as any).tableMethodType}".` +
+            (gen.note ? `\n> ${gen.note}` : '');
+        }
+        if (methodName && methodSource) {
+          bridgeResult = await bridgeAddMethod(
+            context.bridge,
+            objectType,
+            objectName,
+            methodName,
+            methodSource,
           );
         }
         break;
@@ -722,13 +795,14 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'modify-field': {
         if (args.fieldName) {
+          // Map the field-* params onto the bare prop keys the bridge expects.
           const fieldProps: Record<string, string> = {};
-          if ((args as any).label) fieldProps.label = (args as any).label;
-          if ((args as any).helpText) fieldProps.helpText = (args as any).helpText;
-          if ((args as any).mandatory !== undefined) fieldProps.mandatory = String((args as any).mandatory);
-          if ((args as any).edt) fieldProps.edt = (args as any).edt;
-          if ((args as any).enumType) fieldProps.enumType = (args as any).enumType;
-          if ((args as any).stringSize) fieldProps.stringSize = String((args as any).stringSize);
+          if ((args as any).fieldLabel) fieldProps.label = (args as any).fieldLabel;
+          if ((args as any).fieldHelpText) fieldProps.helpText = (args as any).fieldHelpText;
+          if ((args as any).fieldMandatory !== undefined) fieldProps.mandatory = String((args as any).fieldMandatory);
+          if ((args as any).fieldType) fieldProps.edt = (args as any).fieldType;
+          if ((args as any).fieldEnumType) fieldProps.enumType = (args as any).fieldEnumType;
+          if ((args as any).fieldStringSize) fieldProps.stringSize = String((args as any).fieldStringSize);
           bridgeResult = await bridgeModifyField(
             context.bridge,
             objectName,
@@ -776,8 +850,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             objectName,
             (args as any).indexName,
             (args as any).indexFields,
-            (args as any).allowDuplicates,
-            (args as any).alternateKey,
+            (args as any).indexAllowDuplicates,
+            (args as any).indexAlternateKey,
           );
         }
         break;
@@ -821,7 +895,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             objectName,
             (args as any).fieldGroupName,
             (args as any).fieldGroupLabel,
-            (args as any).fields,
+            (args as any).fieldGroupFields,
           );
         }
         break;
@@ -941,7 +1015,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             context.bridge,
             objectName,
             (args as any).enumValueName,
-            (args as any).enumValue ?? 0,
+            (args as any).enumValueInt ?? 0,
             (args as any).enumValueLabel,
             (args as any).enumValueCountryRegionCodes,
           );
@@ -952,7 +1026,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         if ((args as any).enumValueName) {
           const evProps: Record<string, string> = {};
           if ((args as any).enumValueLabel) evProps.label = (args as any).enumValueLabel;
-          if ((args as any).enumValue !== undefined) evProps.value = String((args as any).enumValue);
+          if ((args as any).enumValueInt !== undefined) evProps.value = String((args as any).enumValueInt);
           bridgeResult = await bridgeModifyEnumValue(
             context.bridge,
             objectName,
@@ -982,7 +1056,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             (args as any).controlType ?? 'String',
             (args as any).controlDataSource,
             (args as any).controlDataField,
-            (args as any).label,
+            (args as any).controlLabel,
           );
         }
         break;
@@ -1031,12 +1105,16 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     if (!bridgeResult) {
       const paramHints: Record<string, string[]> = {
         'add-method': ['methodName', 'sourceCode'],
+        'add-display-method': ['methodName', 'sourceCode'],
+        'add-table-method': ['methodName', 'sourceCode'],
         'remove-method': ['methodName'],
         'replace-code': ['oldCode', 'newCode'],
         'add-field': ['fieldName', 'fieldType'],
         'modify-field': ['fieldName'],
         'rename-field': ['fieldName', 'fieldNewName'],
-        'add-index': ['indexName'],
+        'remove-field': ['fieldName'],
+        'replace-all-fields': ['fields'],
+        'add-index': ['indexName', 'indexFields'],
         'remove-index': ['indexName'],
         'add-relation': ['relationName', 'relatedTable'],
         'remove-relation': ['relationName'],
@@ -1045,15 +1123,53 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         'add-field-to-field-group': ['fieldGroupName', 'fieldName'],
         'add-control': ['controlName', 'parentControl'],
         'add-data-source': ['dataSourceName', 'dataSourceTable'],
+        'add-field-modification': ['fieldName'],
+        'add-enum-value': ['enumValueName'],
+        'modify-enum-value': ['enumValueName'],
+        'remove-enum-value': ['enumValueName'],
+        'add-menu-item-to-menu': ['menuItemToAdd'],
         'modify-property': ['propertyPath', 'propertyValue'],
       };
       const required = paramHints[operation] ?? [];
-      const missingList = required.filter(p => !(args as any)[p]).map(p => `  ⛔ ${p}: MISSING`);
-      const providedList = required.filter(p => (args as any)[p]).map(p => `  ✅ ${p}: provided`);
+      // Treat a supplied alias as satisfying the requirement.
+      const aliases: Record<string, string[]> = {
+        sourceCode: ['methodCode'],
+      };
+      const isProvided = (p: string) =>
+        (args as any)[p] !== undefined || (aliases[p] ?? []).some(a => (args as any)[a] !== undefined);
+      const missing = required.filter(p => !isProvided(p));
+
+      // Two distinct causes produce a null bridge result; pick the message that
+      // matches reality instead of always blaming missing parameters.
+      if (missing.length > 0) {
+        const missingList = missing.map(p => `  ⛔ ${p}: MISSING`);
+        const providedList = required.filter(isProvided).map(p => `  ✅ ${p}: provided`);
+        throw new Error(
+          `Bridge operation '${operation}' returned null — required parameters are missing.\n` +
+          `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
+          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+        );
+      }
+
+      // All required params were supplied, yet the bridge returned null. The
+      // cause is object resolution: the C# bridge could not find '${objectName}'
+      // in its metadata model. This is common right after creating the object —
+      // the bridge resolves objects through fixed roots configured at startup
+      // and does not see files written since, so a just-created object is not
+      // yet in its model.
       throw new Error(
-        `Bridge operation '${operation}' returned null — required parameters may be missing.\n` +
-        `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
-        `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+        `Bridge operation '${operation}' returned null even though all required parameters ` +
+        `(${required.join(', ') || 'none'}) were provided.\n` +
+        `Most likely cause: the C# metadata bridge could not resolve ${objectType} '${objectName}'.\n` +
+        `This is typical right after creating an object — the bridge's metadata roots are fixed at ` +
+        `startup, so an object written this session may not be in its model yet.\n` +
+        `Try, in order:\n` +
+        `  1. Refresh the bridge's view of the new object: update_symbol_index({ filePath: "<path to ${objectName}.xml>" }).\n` +
+        `  2. Ensure the model is under the bridge's roots — set context.customPackagesPath / ` +
+        `D365FO_CUSTOM_PACKAGES_PATH to the metadata folder, or pass an explicit filePath to this call.\n` +
+        `  3. Confirm ${objectName}.xml actually exists on disk under those roots.\n` +
+        (actualFilePath ? `Resolved file path: ${actualFilePath}\n` : '') +
+        `If none of these apply, the object may simply not exist or its name may be misspelled.`
       );
     }
     if (!bridgeResult.success) {
@@ -1125,7 +1241,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
           type: 'text',
           text:
             `✅ ${operation} on ${objectType} "${objectName}" — applied via IMetadataProvider.Update()\n\n` +
-            `**File:** ${actualFilePath}${addControlNote}${bridgeValidation}${projectMessage}\n` +
+            `**File:** ${actualFilePath}${addControlNote}${generationNote}${bridgeValidation}${projectMessage}\n` +
             `🔧 API: ${bridgeResult.message}\n\n` +
             `**Next steps:**\n- Review changes in Visual Studio\n- Build the model to validate`,
         },
@@ -1622,4 +1738,189 @@ function resolveEdtBaseTypeForField(edtName: string, db: any, depth = 0): string
   } catch {
     return edtName;
   }
+}
+
+/** Lower-case the first character — D365FO convention for a table buffer variable. */
+function bufferVarName(tableName: string): string {
+  return tableName.charAt(0).toLowerCase() + tableName.slice(1);
+}
+
+/**
+ * Resolve the EDT/type of a table field from the symbol index so generated
+ * find/exist signatures use the correct parameter type. The field's `signature`
+ * column stores its EDT name. Returns null when the field is not indexed.
+ */
+function resolveFieldEdt(tableName: string, fieldName: string, db: any): string | null {
+  try {
+    const row = db.prepare(
+      `SELECT signature FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE AND name = ? COLLATE NOCASE LIMIT 1`
+    ).get(tableName, fieldName) as { signature: string | null } | undefined;
+    const sig = row?.signature?.trim();
+    return sig ? sig : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate idiomatic X++ source for a standard table method from a high-level
+ * `tableMethodType`. The method name is implied by the type (find/exist/…), so
+ * callers need not pass methodName or sourceCode — only tableMethodType (plus
+ * tableKeyField for find/exist).
+ *
+ * Returns the generated method name, source, and an optional advisory note
+ * (e.g. when the key field's EDT could not be resolved from the index).
+ */
+export function generateTableMethodSource(
+  tableName: string,
+  methodType: 'find' | 'exist' | 'findByRecId' | 'validateWrite' | 'validateDelete' | 'initValue',
+  keyField: string | undefined,
+  db: any,
+): { methodName: string; source: string; note?: string } {
+  const buf = bufferVarName(tableName);
+
+  switch (methodType) {
+    case 'find':
+    case 'exist': {
+      if (!keyField) {
+        throw new Error(
+          `add-table-method with tableMethodType="${methodType}" requires tableKeyField ` +
+          `(the primary key field to select on, e.g. tableKeyField="ItemId").`
+        );
+      }
+      const resolvedEdt = resolveFieldEdt(tableName, keyField, db);
+      const paramType = resolvedEdt ?? keyField;
+      const note = resolvedEdt
+        ? undefined
+        : `⚠️ Could not resolve the EDT for field "${keyField}" on "${tableName}" from the index — ` +
+          `the parameter type defaulted to "${keyField}". Verify it compiles, or pass full sourceCode instead.`;
+      const param = `_${bufferVarName(keyField)}`;
+
+      if (methodType === 'find') {
+        const source =
+          `/// <summary>\n` +
+          `/// Finds the <c>${tableName}</c> record for the given ${keyField}.\n` +
+          `/// </summary>\n` +
+          `/// <param name = "${param}">The ${keyField} value to find.</param>\n` +
+          `/// <param name = "_forUpdate">Select the record for update; optional.</param>\n` +
+          `/// <returns>The matching <c>${tableName}</c> record; an empty buffer if none exists.</returns>\n` +
+          `public static ${tableName} find(${paramType} ${param}, boolean _forUpdate = false)\n` +
+          `{\n` +
+          `    ${tableName} ${buf};\n` +
+          `\n` +
+          `    if (${param})\n` +
+          `    {\n` +
+          `        ${buf}.selectForUpdate(_forUpdate);\n` +
+          `\n` +
+          `        select firstonly ${buf}\n` +
+          `            where ${buf}.${keyField} == ${param};\n` +
+          `    }\n` +
+          `\n` +
+          `    return ${buf};\n` +
+          `}`;
+        return { methodName: 'find', source, note };
+      }
+
+      // exist
+      const source =
+        `/// <summary>\n` +
+        `/// Checks whether a <c>${tableName}</c> record exists for the given ${keyField}.\n` +
+        `/// </summary>\n` +
+        `/// <param name = "${param}">The ${keyField} value to check.</param>\n` +
+        `/// <returns>true if a matching record exists; otherwise false.</returns>\n` +
+        `public static boolean exist(${paramType} ${param})\n` +
+        `{\n` +
+        `    return ${param} &&\n` +
+        `        (select firstonly RecId from ${buf}\n` +
+        `            where ${buf}.${keyField} == ${param}).RecId != 0;\n` +
+        `}`;
+      return { methodName: 'exist', source, note };
+    }
+
+    case 'findByRecId': {
+      const source =
+        `/// <summary>\n` +
+        `/// Finds the <c>${tableName}</c> record for the given RecId.\n` +
+        `/// </summary>\n` +
+        `/// <param name = "_recId">The RecId to find.</param>\n` +
+        `/// <param name = "_forUpdate">Select the record for update; optional.</param>\n` +
+        `/// <returns>The matching <c>${tableName}</c> record; an empty buffer if none exists.</returns>\n` +
+        `public static ${tableName} findByRecId(RefRecId _recId, boolean _forUpdate = false)\n` +
+        `{\n` +
+        `    ${tableName} ${buf};\n` +
+        `\n` +
+        `    if (_recId)\n` +
+        `    {\n` +
+        `        ${buf}.selectForUpdate(_forUpdate);\n` +
+        `\n` +
+        `        select firstonly ${buf}\n` +
+        `            where ${buf}.RecId == _recId;\n` +
+        `    }\n` +
+        `\n` +
+        `    return ${buf};\n` +
+        `}`;
+      return { methodName: 'findByRecId', source };
+    }
+
+    case 'validateWrite':
+    case 'validateDelete': {
+      const source =
+        `/// <summary>\n` +
+        `/// Validates the record before ${methodType === 'validateWrite' ? 'writing' : 'deletion'}.\n` +
+        `/// </summary>\n` +
+        `/// <returns>true if the record is valid; otherwise false.</returns>\n` +
+        `public boolean ${methodType}()\n` +
+        `{\n` +
+        `    boolean ret;\n` +
+        `\n` +
+        `    ret = super();\n` +
+        `\n` +
+        `    // TODO: add custom ${methodType} validation\n` +
+        `\n` +
+        `    return ret;\n` +
+        `}`;
+      return { methodName: methodType, source };
+    }
+
+    case 'initValue': {
+      const source =
+        `/// <summary>\n` +
+        `/// Initializes the record with default field values.\n` +
+        `/// </summary>\n` +
+        `public void initValue()\n` +
+        `{\n` +
+        `    super();\n` +
+        `\n` +
+        `    // TODO: set default field values\n` +
+        `}`;
+      return { methodName: 'initValue', source };
+    }
+
+    default: {
+      // Exhaustiveness guard — the schema enum should keep this unreachable.
+      throw new Error(`Unsupported tableMethodType: ${methodType as string}`);
+    }
+  }
+}
+
+/**
+ * Generate an X++ display method stub returning the given EDT/type.
+ * Used when add-display-method is called with displayMethodReturnEdt but no
+ * explicit sourceCode/methodCode.
+ */
+export function generateDisplayMethodSource(methodName: string, returnEdt: string): string {
+  return (
+    `/// <summary>\n` +
+    `/// Display method returning <c>${returnEdt}</c>.\n` +
+    `/// </summary>\n` +
+    `/// <returns>The computed ${returnEdt} value.</returns>\n` +
+    `public display ${returnEdt} ${methodName}()\n` +
+    `{\n` +
+    `    ${returnEdt} ret;\n` +
+    `\n` +
+    `    // TODO: compute the display value\n` +
+    `\n` +
+    `    return ret;\n` +
+    `}`
+  );
 }

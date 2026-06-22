@@ -16,6 +16,7 @@ import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
 import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject } from '../bridge/index.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnFormPatternErrors } from './validateFormPattern.js';
+import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
@@ -627,8 +628,12 @@ ${methodsXml}\t</SourceCode>
     // Build <Fields> block from properties.fields array (TableFieldSpec[]).
     // Copilot may pass field definitions via properties.fields or via sourceCode JSON —
     // both paths merge into properties before calling here (see generate()).
-    const fieldSpecs: Array<{ name: string; edt?: string; type?: string; mandatory?: boolean; label?: string }> =
-      Array.isArray(properties?.fields) ? properties.fields : [];
+    // Field-spec keys are unified with the table-extension path (generateAxTableExtensionXml):
+    // accept an explicit AxTableField* i:type (fieldType), a primitive base type (type),
+    // or infer AxTableFieldEnum from enumType — and always emit <EnumType> for enum fields.
+    const fieldSpecs: Array<{
+      name: string; edt?: string; type?: string; fieldType?: string; enumType?: string; mandatory?: boolean; label?: string;
+    }> = Array.isArray(properties?.fields) ? properties.fields : [];
 
     let fieldsXml: string;
     if (fieldSpecs.length === 0) {
@@ -636,14 +641,17 @@ ${methodsXml}\t</SourceCode>
     } else {
       fieldsXml = '\t<Fields>\n';
       for (const f of fieldSpecs) {
-        // Determine i:type: use explicit type if provided, otherwise derive from EDT name heuristics.
-        // NEVER default to AxTableFieldString blindly when an EDT is present — EDT base type matters!
-        const iType = fieldTypeToAxType(f.type || 'String', f.edt);
+        // Determine i:type: explicit AxTableField* wins; otherwise derive from the
+        // primitive type / enumType / EDT name heuristics. NEVER default to
+        // AxTableFieldString blindly when an EDT or enumType is present.
+        const iType = f.fieldType
+          ?? fieldTypeToAxType(f.type || (f.enumType ? 'Enum' : 'String'), f.edt);
         fieldsXml += `\t\t<AxTableField xmlns=""\n\t\t\ti:type="${iType}">\n`;
         fieldsXml += `\t\t\t<Name>${f.name}</Name>\n`;
         if (f.edt)       fieldsXml += `\t\t\t<ExtendedDataType>${f.edt}</ExtendedDataType>\n`;
-        if (f.mandatory) fieldsXml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
         if (f.label)     fieldsXml += `\t\t\t<Label>${f.label}</Label>\n`;
+        if (f.mandatory) fieldsXml += `\t\t\t<Mandatory>Yes</Mandatory>\n`;
+        if (f.enumType)  fieldsXml += `\t\t\t<EnumType>${f.enumType}</EnumType>\n`;
         fieldsXml += `\t\t</AxTableField>\n`;
       }
       fieldsXml += '\t</Fields>\n';
@@ -757,59 +765,39 @@ ${enumValuesXml}${isExtensibleXml}</AxEnum>
   }
 
   /**
-   * Generate AxForm XML structure (based on real D365FO form structure)
+   * Generate AxForm XML for a new form from a pattern template.
+   *
+   * Delegates to the pattern-compliant {@link FormPatternTemplates} builders so
+   * the generated skeleton actually satisfies the form-pattern gate. The old
+   * inline skeleton declared a `<Pattern>` over empty `<Controls />`, which the
+   * gate rejected as FP003 (required Grid/ActionPane missing) for every pattern
+   * — and worse, defaulted to a `DetailsTransaction` pattern even when the
+   * caller asked for a `SimpleList` template, guaranteeing a mismatch block.
+   *
+   * Pattern resolution: callers may express the intent as either `pattern`
+   * (the design pattern) or `formTemplate` (the VS template name); both are
+   * fuzzy strings normalized to a canonical pattern. When neither is given we
+   * default to SimpleList — the most common shape for a new setup table.
    */
   static generateAxFormXml(
     formName: string,
     properties?: Record<string, any>
   ): string {
-    const caption = properties?.caption || `@${formName}`;
-    const formTemplate = properties?.formTemplate || 'DetailsPage';
-    const pattern = properties?.pattern || 'DetailsTransaction';
-    const dataSource = properties?.dataSource || '';
-    const interactionClass = properties?.interactionClass || '';
-    const style = properties?.style || 'DetailsFormTransaction';
+    const rawPattern = properties?.pattern || properties?.formTemplate;
+    const pattern = rawPattern
+      ? FormPatternTemplates.normalizePattern(String(rawPattern))
+      : 'SimpleList';
 
-    // Build class declaration for SourceCode
-    const extendsFrom = properties?.extends || 'FormRun';
-    const classDeclaration = properties?.classDeclaration || 
-      `[Form]\npublic class ${formName} extends ${extendsFrom}\n{\n}`;
-
-    // Build optional InteractionClass
-    const interactionClassXml = interactionClass
-      ? `\t<InteractionClass>${interactionClass}</InteractionClass>\n`
-      : '';
-
-    // Build DataSource reference for Design
-    const dataSourceXml = dataSource
-      ? `\t\t<DataSource xmlns="">${dataSource}</DataSource>\n`
-      : '';
-
-    return `<?xml version="1.0" encoding="utf-8"?>
-<AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
-\t<Name>${formName}</Name>
-\t<SourceCode>
-\t\t<Methods xmlns="">
-\t\t\t<Method>
-\t\t\t\t<Name>classDeclaration</Name>
-\t\t\t\t<Source><![CDATA[
-${classDeclaration}
-
-]]></Source>
-\t\t\t</Method>
-\t\t</Methods>
-\t</SourceCode>
-\t<FormTemplate>${formTemplate}</FormTemplate>
-${interactionClassXml}\t<DataSources />
-\t<Design>
-\t\t<Caption xmlns="">${caption}</Caption>
-${dataSourceXml}\t\t<Pattern xmlns="">${pattern}</Pattern>
-\t\t<Style xmlns="">${style}</Style>
-\t\t<Controls xmlns="" />
-\t</Design>
-\t<Parts />
-</AxForm>
-`;
+    return FormPatternTemplates.build(pattern, {
+      formName,
+      dsName: properties?.dataSource || undefined,
+      dsTable: properties?.dataSourceTable || properties?.dataSource || undefined,
+      caption: properties?.caption,
+      gridFields: Array.isArray(properties?.gridFields) ? properties.gridFields : undefined,
+      linesDsName: properties?.linesDataSource,
+      linesDsTable: properties?.linesDataSourceTable || properties?.linesDataSource,
+      sections: Array.isArray(properties?.sections) ? properties.sections : undefined,
+    });
   }
 
   /**
@@ -2622,30 +2610,58 @@ ${relationsXml}
   }
 
   /**
+   * Normalize a name list that may arrive as an array or a comma/semicolon/
+   * newline-separated string (models pass either). Returns trimmed, non-empty names.
+   */
+  static normalizeNameList(value: any): string[] {
+    if (!value) return [];
+    const arr = Array.isArray(value) ? value : String(value).split(/[,;\n]+/);
+    return arr.map((s: any) => String(s).trim()).filter((s: string) => s.length > 0);
+  }
+
+  /**
+   * Render a security reference container: a self-closing tag when empty, or the
+   * wrapped child references (e.g. <AxSecurityRolePermissionSet><Name>…</Name></…>).
+   */
+  private static securityRefContainer(container: string, childTag: string, names: string[]): string {
+    if (names.length === 0) return `\t<${container} />`;
+    const children = names
+      .map(n => `\t\t<${childTag}>\n\t\t\t<Name>${n}</Name>\n\t\t</${childTag}>`)
+      .join('\n');
+    return `\t<${container}>\n${children}\n\t</${container}>`;
+  }
+
+  /**
    * Generate AxSecurityDuty XML.
+   * properties.privileges – privilege names to reference (array or comma-separated).
    */
   static generateAxSecurityDutyXml(name: string, properties?: Record<string, any>): string {
     const label = properties?.label || '@TODO:LabelId';
+    const privileges = this.normalizeNameList(properties?.privileges);
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxSecurityDuty xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${name}</Name>
 \t<Label>${label}</Label>
-\t<Privileges />
+${this.securityRefContainer('Privileges', 'AxSecurityRolePermissionSet', privileges)}
 </AxSecurityDuty>`;
   }
 
   /**
    * Generate AxSecurityRole XML.
+   * properties.duties     – duty names to reference (array or comma-separated).
+   * properties.privileges – privilege names to reference directly on the role.
    */
   static generateAxSecurityRoleXml(name: string, properties?: Record<string, any>): string {
     const label = properties?.label || '@TODO:LabelId';
+    const duties = this.normalizeNameList(properties?.duties);
+    const privileges = this.normalizeNameList(properties?.privileges);
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxSecurityRole xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${name}</Name>
 \t<Label>${label}</Label>
 \t<DirectAccessPermissions />
-\t<Duties />
-\t<Privileges />
+${this.securityRefContainer('Duties', 'AxSecurityRoleDutyPermission', duties)}
+${this.securityRefContainer('Privileges', 'AxSecurityRolePermissionSet', privileges)}
 \t<SubRoles />
 </AxSecurityRole>`;
   }

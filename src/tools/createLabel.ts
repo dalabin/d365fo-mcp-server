@@ -112,10 +112,11 @@ const CreateLabelArgsSchema = z.object({
   createLabelFileIfMissing: z
     .boolean()
     .optional()
-    .default(false)
+    .default(true)
     .describe(
-      'If true and the AxLabelFile does not exist yet, create it with the provided translations. ' +
-        'Set to false (default) to fail fast when the label file is missing.',
+      'If true (default) and the AxLabelFile does not exist yet, create it with the provided ' +
+        'translations. A wrong-path guard still fails loudly when the model directory is not found, ' +
+        'so this never produces a phantom label file. Set to false to fail fast instead of creating.',
     ),
   allowExtensionLabelFile: z
     .boolean()
@@ -139,6 +140,15 @@ const CreateLabelArgsSchema = z.object({
       'Sort labels alphabetically when writing .label.txt files. ' +
         'When false, new labels are appended at the end preserving existing file order. ' +
         'Defaults to the LABEL_SORT_ORDER env var ("alphabetical" = true, "append" = false), or true if not set.',
+    ),
+  overwriteExisting: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Update mode (set automatically by labels(action="update")): overwrite the text of an ' +
+        'existing label instead of skipping it. When the label is absent in a target language it ' +
+        'is created (upsert). Off by default so create never clobbers existing text.',
     ),
 });
 
@@ -393,13 +403,111 @@ function normalizeCreateLabelArgs(raw: unknown): Record<string, unknown> {
   return args;
 }
 
+// ── Bulk fan-out ──────────────────────────────────────────────────────────────
+
+/**
+ * Pull a `labels: [...]` array off the raw args, if present and non-empty.
+ * Bulk callers pass shared fields (labelFileId, model, paths…) at the top level
+ * and one entry per label ({ labelId, translations, … }). Returns null for the
+ * ordinary single-label shape so the normal path runs unchanged.
+ */
+export function extractBulkLabels(raw: unknown): Array<Record<string, unknown>> | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const arr = (raw as Record<string, unknown>).labels;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return arr.filter((e): e is Record<string, unknown> => e !== null && typeof e === 'object');
+}
+
+/** The single-label create signature, injectable so the fan-out is testable. */
+export type SingleLabelRunner = (
+  request: CallToolRequest,
+  context: XppServerContext,
+) => Promise<any>;
+
+/**
+ * Create many labels in one call. Each entry is merged over the shared top-level
+ * fields and routed through the single-label path (which keeps validation, file
+ * creation and indexing identical), then results are aggregated into one report.
+ * Continues past per-label failures so one bad entry doesn't abort the batch.
+ */
+export async function createLabelsBulk(
+  entries: Array<Record<string, unknown>>,
+  raw: Record<string, unknown>,
+  context: XppServerContext,
+  runSingle: SingleLabelRunner = createLabelTool,
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError: boolean }> {
+  // Shared fields = everything except the per-entry array and any top-level
+  // labelId/translations (each entry owns those).
+  const shared: Record<string, unknown> = { ...raw };
+  delete shared.labels;
+  delete shared.labelId;
+  delete shared.translations;
+
+  const lines: string[] = [];
+  let created = 0;
+  let failed = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const mergedArgs = { ...shared, ...entry };
+    const labelId = typeof entry.labelId === 'string' ? entry.labelId : `(entry ${i + 1})`;
+    const subRequest: CallToolRequest = {
+      method: 'tools/call',
+      params: { name: 'create_label', arguments: mergedArgs },
+    };
+    // Recurses into the single-label path: mergedArgs carries no `labels` array,
+    // so extractBulkLabels returns null and the normal handler runs.
+    const res = await runSingle(subRequest, context);
+    const text = res?.content?.[0]?.text ?? '(no output)';
+    if (res?.isError) {
+      failed++;
+      lines.push(`🔴 ${labelId}: ${text.split('\n')[0]}`);
+    } else {
+      created++;
+      lines.push(`🟢 ${labelId}: ${text.split('\n')[0]}`);
+    }
+  }
+
+  const header =
+    `${failed === 0 ? '✅' : '⚠️'} labels(action="create", labels=[…]): ` +
+    `${created} created, ${failed} failed (of ${entries.length}).`;
+  return {
+    content: [{ type: 'text', text: [header, '', ...lines].join('\n') }],
+    isError: failed > 0,
+  };
+}
+
 // ── Tool implementation ───────────────────────────────────────────────────────
 
 export async function createLabelTool(request: CallToolRequest, context: XppServerContext) {
+  // Bulk shape: a `labels` array fans out to one single-label create per entry.
+  const bulk = extractBulkLabels(request.params.arguments);
+  if (bulk) {
+    return createLabelsBulk(bulk, request.params.arguments as Record<string, unknown>, context);
+  }
   try {
-    const args = CreateLabelArgsSchema.parse(
+    const parsed = CreateLabelArgsSchema.safeParse(
       normalizeCreateLabelArgs(request.params.arguments),
     );
+    if (!parsed.success) {
+      // Name the offending field(s) instead of leaking a bare zod
+      // "expected string, received undefined" with no field reference.
+      const issues = parsed.error.issues
+        .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ');
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `❌ labels(action="create"/"update"): invalid arguments — ${issues}.\n` +
+            `Required: labelId, labelFileId, model, translations:[{language, text}]. Example:\n` +
+            `  labels(action="create", labelId="EquipmentName", labelFileId="ContosoExt", model="ContosoExt", ` +
+            `translations=[{language:"en-US", text:"Equipment name"}])`,
+        }],
+        isError: true,
+      };
+    }
+    const args = parsed.data;
     const {
       labelId: labelIdArg,
       labelFileId,
@@ -749,8 +857,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const eol = detectEol(content);
       const labelMap = parseLabelMap(content);
 
-      // Duplicate check
-      if (labelMap.has(labelId)) {
+      // Duplicate check — create skips an existing label, update overwrites it.
+      if (labelMap.has(labelId) && !args.overwriteExisting) {
         skipped.push(`${lang} (already exists: "${labelMap.get(labelId)!.text}")`);
         continue;
       }
@@ -870,7 +978,7 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
     const ref = `@${labelFileId}:${labelId}`;
     const lines: string[] = [
       ...(collisionWarning ? [collisionWarning] : []),
-      `✅ Label "${ref}" created successfully!`,
+      `✅ Label "${ref}" ${args.overwriteExisting ? 'updated' : 'created'} successfully!`,
       '',
       `Label ID   : ${labelId}`,
       `Label File : ${labelFileId}  (model: ${model})`,

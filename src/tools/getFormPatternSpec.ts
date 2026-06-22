@@ -55,6 +55,76 @@ function renderNode(node: NodeSpec, indent: string, lines: string[]): void {
   for (const child of node.children ?? []) renderNode(child, indent + '  ', lines);
 }
 
+/**
+ * Inverse of normalizeControlType (src/metadata/formPatternMiner.ts): a
+ * normalized container type maps back to its serialized i:type as
+ * `AxForm<Type>Control`. Returns null for the wildcard slot, where no single
+ * concrete control can be emitted.
+ */
+function axIType(normalized: string): string | null {
+  if (!normalized || normalized === '*') return null;
+  return `AxForm${normalized}Control`;
+}
+
+function renderSkeletonNode(node: NodeSpec, indent: string, lines: string[]): void {
+  const primary = node.controlTypes.find((t) => t !== '*') ?? node.controlTypes[0];
+  const iType = axIType(primary);
+  if (!iType) {
+    lines.push(`${indent}<!-- "${node.id}": ${node.controlTypes.join('|')} (${occurrenceLabel(node.occurrence)}) -->`);
+    return;
+  }
+  lines.push(`${indent}<AxFormControl xmlns="" i:type="${iType}">`);
+  lines.push(`${indent}  <Name>${node.nameHint ?? node.id}</Name>`);
+  for (const [k, v] of Object.entries(node.properties ?? {})) {
+    lines.push(`${indent}  <${k}>${v}</${k}>`);
+  }
+  if (node.requiresSubPattern) {
+    const sp = node.allowedSubPatterns?.[0];
+    if (sp) {
+      lines.push(`${indent}  <Pattern>${sp}</Pattern>`);
+      lines.push(`${indent}  <!-- set <PatternVersion> from object_patterns(action="spec", pattern="${sp}") -->`);
+    } else {
+      lines.push(`${indent}  <!-- this container requires a sub-pattern: declare <Pattern>…</Pattern> -->`);
+    }
+  }
+  lines.push(`${indent}  <FormControlExtension i:nil="true" />`);
+  if (node.children?.length) {
+    lines.push(`${indent}  <Controls>`);
+    for (const child of node.children) renderSkeletonNode(child, indent + '    ', lines);
+    lines.push(`${indent}  </Controls>`);
+  } else {
+    lines.push(`${indent}  <Controls><!-- add child controls / field bindings here --></Controls>`);
+  }
+  lines.push(`${indent}</AxFormControl>`);
+}
+
+/**
+ * A copy-pasteable Design subtree with the required containers, types, order,
+ * Style properties and sub-patterns already in place — the exact shape FP003
+ * (missing container), FP004 (wrong control under a slot) and FP007 (wrong
+ * sub-pattern) enforce. Lets a generator get the structure right on the first
+ * attempt instead of translating the abstract tree above into XML by hand.
+ */
+function renderXmlSkeleton(spec: FormPatternSpec): string[] {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('## Copy-paste XML skeleton (Design subtree — structurally pattern-valid)');
+  lines.push('```xml');
+  lines.push('<Design>');
+  lines.push(`  <Pattern xmlns="">${spec.xmlName}</Pattern>`);
+  lines.push(`  <PatternVersion xmlns="">${spec.versions[0]}</PatternVersion>`);
+  for (const [k, v] of Object.entries(spec.designProperties ?? {})) {
+    lines.push(`  <${k} xmlns="">${v}</${k}>`);
+  }
+  lines.push('  <Controls xmlns="">');
+  for (const node of spec.root) renderSkeletonNode(node, '    ', lines);
+  lines.push('  </Controls>');
+  lines.push('</Design>');
+  lines.push('```');
+  lines.push('> Fill in datasource bindings and field/grid child controls. The container types, order, `Style` and sub-patterns above are what the pattern validator enforces.');
+  return lines;
+}
+
 function renderTopLevel(spec: FormPatternSpec, db: any): string {
   const lines: string[] = [];
   lines.push(`# Form Pattern: ${spec.displayName}`);
@@ -80,6 +150,8 @@ function renderTopLevel(spec: FormPatternSpec, db: any): string {
   else if (Array.isArray(spec.extraRootChildren)) lines.push(`(extra root controls allowed: ${spec.extraRootChildren.join(', ')})`);
   else lines.push('(additional root controls tolerated)');
   lines.push('```');
+
+  lines.push(...renderXmlSkeleton(spec));
 
   if (spec.designProperties) {
     lines.push('');

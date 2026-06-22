@@ -126,7 +126,7 @@ persists for all subsequent tool calls in the same session.
 | Priority | Source | Notes |
 |----------|--------|-------|
 | 1st | Explicit `D365FO_MODEL_NAME` env var | Always wins |
-| 2nd | Last segment of `D365FO_WORKSPACE_PATH` | Only used when path contains `PackagesLocalDirectory` — avoids returning repo names like `ASL` |
+| 2nd | Last segment of `D365FO_WORKSPACE_PATH` | Only used when path contains `PackagesLocalDirectory` — avoids returning repo folder names like `MyMetadataRepo` |
 | 3rd | Auto-detected from `.rnrproj` scan | Triggered by roots protocol, `D365FO_SOLUTIONS_PATH`, or workspace seed |
 
 Each value's detection source is shown in `get_workspace_info` output:

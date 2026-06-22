@@ -15,7 +15,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
-import { handleGetFormPatterns } from './getFormPatterns.js';
+import { getFormPatternsTool } from './getFormPatterns.js';
 import { validateFormPatternTool } from './validateFormPattern.js';
 import { getFormPatternSpecTool } from './getFormPatternSpec.js';
 
@@ -53,9 +53,7 @@ export async function formPatternTool(request: CallToolRequest, context: XppServ
     return getFormPatternSpecTool(subRequest('get_form_pattern_spec', rest), context);
   }
 
-  // analyze: legacy handler takes (args, symbolIndex) and returns { content }.
-  const r = await handleGetFormPatterns(rest as any, context.symbolIndex);
-  return { content: r?.content ?? [{ type: 'text', text: 'No results returned' }] };
+  return getFormPatternsTool(subRequest('get_form_patterns', rest), context);
 }
 
 // Tool registration (name, description, inputSchema) lives inline in

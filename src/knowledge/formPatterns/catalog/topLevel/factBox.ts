@@ -9,7 +9,9 @@ import type { FormPatternSpec } from '../../types.js';
 export const factBoxGrid: FormPatternSpec = {
   id: 'FormPartFactboxGrid',
   xmlName: 'FormPartFactboxGrid',
-  xmlAliases: ['FactBoxGrid', 'FormPartFactBoxGrid'],
+  // Bare "FactBox" resolves to the grid variant — the common "child collection
+  // beside a parent form" case. The card variant must be named explicitly.
+  xmlAliases: ['FactBox', 'FactBoxGrid', 'FormPartFactBoxGrid'],
   displayName: 'Form Part FactBox Grid',
   versions: ['1.1', '1.0'],
   purpose: 'FactBox showing a child collection of related records as a small grid.',

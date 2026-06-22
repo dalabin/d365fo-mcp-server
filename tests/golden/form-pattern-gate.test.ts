@@ -168,6 +168,26 @@ describe('form pattern gate in create_d365fo_file', () => {
     expect(vi.mocked(fsMock.writeFile)).toHaveBeenCalled();
   });
 
+  it('generates a gate-passing form from a SimpleList template (no xmlContent)', async () => {
+    // Regression: requesting formTemplate="SimpleList" with no xmlContent used to
+    // emit an empty-controls skeleton declaring a DetailsTransaction pattern,
+    // which the gate blocked (FP003 missing ActionPane/Tab). The template path
+    // must now produce a pattern-compliant SimpleList that writes cleanly.
+    process.env.FORM_PATTERN_ENFORCE = 'true';
+    const result = await handleCreateD365File(createReq({
+      objectType: 'form',
+      objectName: 'RentEquipment',
+      properties: { formTemplate: 'SimpleList', dataSource: 'AslRentEquipment', caption: 'Rent Equipment' },
+      modelName: 'ContosoExt',
+      addToProject: false,
+    }));
+    expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+    expect(vi.mocked(fsMock.writeFile)).toHaveBeenCalled();
+    const written = String(vi.mocked(fsMock.writeFile).mock.calls.at(-1)?.[1] ?? '');
+    expect(written).toContain('<Pattern xmlns="">SimpleList</Pattern>');
+    expect(written).not.toContain('DetailsTransaction');
+  });
+
   it('never gates non-form objectTypes', async () => {
     process.env.FORM_PATTERN_ENFORCE = 'true';
     const result = await handleCreateD365File(createReq({

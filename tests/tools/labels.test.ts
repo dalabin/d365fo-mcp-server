@@ -8,6 +8,7 @@ import { searchLabelsTool } from '../../src/tools/searchLabels';
 import { getLabelInfoTool } from '../../src/tools/getLabelInfo';
 import { createLabelTool } from '../../src/tools/createLabel';
 import { renameLabelTool } from '../../src/tools/renameLabel';
+import { labelsTool } from '../../src/tools/labels';
 import { isExtensionLabelFile } from '../../src/metadata/labelParser';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -1545,5 +1546,99 @@ describe('rename_label', () => {
     expect(labelWrite!.content).toContain('AppleLabel=Apple text\n');
     // No CRLF sequences must be present — file must stay pure LF.
     expect(labelWrite!.content).not.toContain('\r\n');
+  });
+});
+
+describe('labels dispatcher: action aliases + errors', () => {
+  let ctx: XppServerContext;
+  beforeEach(() => { ctx = buildContext(); });
+
+  it('redirects create-label-file to d365fo_file with a clear message', async () => {
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: { action: 'create-label-file', model: 'MyModel' } } } as CallToolRequest,
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('d365fo_file');
+  });
+
+  it('rejects an unknown action and lists the valid ones', async () => {
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: { action: 'frobnicate' } } } as CallToolRequest,
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('search, info, create, update, rename');
+  });
+
+  // A model whose en-US label file already contains MyExistingLabel.
+  const seedExistingLabel = async () => {
+    const fsMock = await import('fs');
+    (fsMock.promises.readFile as any).mockImplementation(
+      async () => '; Label file\nMyExistingLabel=Existing label text\n',
+    );
+    (fsMock.promises.readdir as any).mockImplementation(async () => ['en-US']);
+  };
+
+  it('action="update" overwrites the text of an existing label', async () => {
+    await seedExistingLabel();
+    (ctx.symbolIndex.getLabelById as any).mockReturnValue([]);
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: {
+        action: 'update',
+        labelId: 'MyExistingLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Corrected text' }],
+      } } } as CallToolRequest,
+      ctx,
+    );
+    expect(r.isError).toBeFalsy();
+    expect(r.content[0].text).toMatch(/updated successfully/i);
+  });
+
+  it('action="create" refuses to overwrite an existing label', async () => {
+    await seedExistingLabel();
+    (ctx.symbolIndex.getLabelById as any).mockReturnValue([]);
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: {
+        action: 'create',
+        labelId: 'MyExistingLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        translations: [{ language: 'en-US', text: 'Different text' }],
+      } } } as CallToolRequest,
+      ctx,
+    );
+    expect(r.content[0].text).toMatch(/already exists|No label text changes/i);
+  });
+
+  it('names the missing field when create/update args are incomplete', async () => {
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: { action: 'create', labelId: 'Foo' } } } as CallToolRequest,
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toMatch(/invalid arguments/i);
+    expect(r.content[0].text).toContain('labelFileId');
+  });
+
+  it('aliases action="list" to info (not rejected as invalid)', async () => {
+    // "list" is not a canonical action; the alias map rewrites it to "info" so
+    // safeParse succeeds and it dispatches instead of failing validation.
+    let r: any;
+    try {
+      r = await labelsTool(
+        { method: 'tools/call', params: { name: 'labels', arguments: { action: 'list', model: 'MyModel' } } } as CallToolRequest,
+        ctx,
+      );
+    } catch {
+      // A downstream sub-tool error is fine here — it means the alias was accepted
+      // and we got past argument validation, which is what this test asserts.
+      return;
+    }
+    expect(r.content?.[0]?.text ?? '').not.toContain('invalid arguments');
   });
 });

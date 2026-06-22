@@ -317,6 +317,79 @@ describe('XmlTemplateGenerator.splitXppClassSource', () => {
   });
 });
 
+// ─── XmlTemplateGenerator security generators ───────────────────────────────
+
+describe('XmlTemplateGenerator security duty/role generators', () => {
+  it('emits privilege references on a duty from properties.privileges', () => {
+    const xml = XmlTemplateGenerator.generateAxSecurityDutyXml('MyDuty', {
+      label: '@My:Duty',
+      privileges: ['MyView', 'MyMaintain'],
+    });
+    expect(xml).toContain('<AxSecurityRolePermissionSet>\n\t\t\t<Name>MyView</Name>');
+    expect(xml).toContain('<Name>MyMaintain</Name>');
+    expect(xml).not.toContain('<Privileges />');
+  });
+
+  it('accepts a comma-separated privilege string', () => {
+    const xml = XmlTemplateGenerator.generateAxSecurityDutyXml('MyDuty', {
+      privileges: 'MyView, MyMaintain',
+    });
+    expect(xml).toContain('<Name>MyView</Name>');
+    expect(xml).toContain('<Name>MyMaintain</Name>');
+  });
+
+  it('keeps an empty self-closing Privileges when none are given', () => {
+    const xml = XmlTemplateGenerator.generateAxSecurityDutyXml('MyDuty', {});
+    expect(xml).toContain('<Privileges />');
+  });
+
+  it('emits duty references on a role from properties.duties', () => {
+    const xml = XmlTemplateGenerator.generateAxSecurityRoleXml('MyRole', {
+      duties: ['MyDuty1', 'MyDuty2'],
+    });
+    expect(xml).toContain('<AxSecurityRoleDutyPermission>\n\t\t\t<Name>MyDuty1</Name>');
+    expect(xml).toContain('<Name>MyDuty2</Name>');
+    expect(xml).not.toContain('<Duties />');
+  });
+});
+
+// ─── table create: enum field generation ─────────────────────────────────────
+
+describe('XmlTemplateGenerator.generateAxTableXml enum fields', () => {
+  it('emits AxTableFieldEnum + EnumType from enumType (extension-style field spec)', () => {
+    const xml = XmlTemplateGenerator.generateAxTableXml('ContosoRentEquipment', {
+      fields: [{ name: 'EquipmentStatus', enumType: 'NoYes', label: '@Contoso:Status' }],
+    });
+    expect(xml).toContain('i:type="AxTableFieldEnum"');
+    expect(xml).toContain('<EnumType>NoYes</EnumType>');
+    expect(xml).not.toContain('AxTableFieldString');
+  });
+
+  it('honors an explicit fieldType="AxTableFieldEnum"', () => {
+    const xml = XmlTemplateGenerator.generateAxTableXml('ContosoRentEquipment', {
+      fields: [{ name: 'EquipmentStatus', fieldType: 'AxTableFieldEnum', enumType: 'NoYes' }],
+    });
+    expect(xml).toContain('i:type="AxTableFieldEnum"');
+    expect(xml).toContain('<EnumType>NoYes</EnumType>');
+  });
+
+  it('still maps the primitive type="Enum" spec to an enum field', () => {
+    const xml = XmlTemplateGenerator.generateAxTableXml('ContosoRentEquipment', {
+      fields: [{ name: 'EquipmentStatus', type: 'Enum', enumType: 'NoYes' }],
+    });
+    expect(xml).toContain('i:type="AxTableFieldEnum"');
+    expect(xml).toContain('<EnumType>NoYes</EnumType>');
+  });
+
+  it('leaves plain string fields untouched', () => {
+    const xml = XmlTemplateGenerator.generateAxTableXml('ContosoRentEquipment', {
+      fields: [{ name: 'EquipmentName', edt: 'Name' }],
+    });
+    expect(xml).toContain('i:type="AxTableFieldString"');
+    expect(xml).not.toContain('<EnumType>');
+  });
+});
+
 // ─── generate_smart_table ────────────────────────────────────────────────────
 
 describe('generate_smart_table', () => {
@@ -389,6 +462,23 @@ describe('generate_smart_form', () => {
     );
     expect(result?.content[0].text).toContain('MyCustomForm');
     expect(result?.content[0].text).toContain('MyCustomTable');
+  });
+
+  it('warns when the requested pattern has no template and degrades to another', async () => {
+    // "Task" has a catalog spec (TaskSingle) but no builder template, so it
+    // silently falls back to SimpleList. The output must say so and point at a
+    // reference form to clone instead.
+    const result = await handleGenerateSmartForm(
+      {
+        name: 'MyTaskForm',
+        modelName: 'MyModel',
+        dataSource: 'MyCustomTable',
+        formPattern: 'Task',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.content[0].text).toContain('No dedicated template');
+    expect(result?.content[0].text).toContain('cloneFrom');
   });
 });
 

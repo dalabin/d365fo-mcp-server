@@ -16,6 +16,7 @@ import { ProjectFileManager } from './createD365File.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 import { validateFormPatternXml } from '../validation/formPatternValidator.js';
+import { resolvePattern } from '../knowledge/formPatterns/index.js';
 import { cloneFormXml } from '../utils/formCloner.js';
 import { methodStubsForPattern, injectMethodStubs } from '../knowledge/formPatterns/methodStubs.js';
 import { findBaseFormXml } from './modifyD365File.js';
@@ -105,6 +106,37 @@ export const generateSmartFormTool: Tool = {
     required: ['name'],
   },
 };
+
+/**
+ * Pre-write check for cloneFrom: cloning copies the reference form's control
+ * hierarchy and sub-patterns verbatim. If the caller asked for a different
+ * pattern than the reference declares, the result will likely violate the
+ * requested pattern (e.g. SimpleListDetails forbids a Tab the source carried)
+ * and be rejected by the form-pattern validator. Returns a warning line when the
+ * cloned form's declared <Pattern> differs from the requested pattern, or null
+ * when they match / either can't be determined.
+ */
+export function cloneFromPatternMismatchWarning(
+  requestedPattern: string | undefined,
+  clonedXml: string,
+  sourceFormName: string,
+): string | null {
+  if (!requestedPattern) return null;
+  const intended = resolvePattern(requestedPattern);
+  const clonedPattern = clonedXml.match(/<Pattern xmlns="">([^<]+)<\/Pattern>/)?.[1];
+  if (!intended || !clonedPattern) return null;
+  if (intended.xmlName.toLowerCase() === clonedPattern.toLowerCase()) return null;
+
+  const ref = intended.referenceForms?.[0];
+  return (
+    `🛑 PATTERN MISMATCH — you requested "${intended.xmlName}" but "${sourceFormName}" is a "${clonedPattern}" form. ` +
+    `Cloning copies that structure verbatim, so the result may violate "${intended.xmlName}" ` +
+    `(controls/sub-patterns the target pattern disallows) and be rejected by the form-pattern validator.` +
+    (ref
+      ? ` Clone a "${intended.xmlName}" reference instead, e.g. cloneFrom="${ref}".`
+      : ` Clone a reference form that already uses "${intended.xmlName}".`)
+  );
+}
 
 export async function handleGenerateSmartForm(
   args: GenerateSmartFormArgs,
@@ -359,6 +391,7 @@ export async function handleGenerateSmartForm(
     const cloneResult = cloneFormXml(sourceXml, {
       targetFormName: finalName,
       tableMapping,
+      caption: caption || label,
       getTableFields: (table: string) => {
         const rows = fieldStmt.all(table) as Array<{ name: string }>;
         return rows.length > 0 ? rows.map((r) => r.name) : null; // unknown table → keep fields
@@ -373,12 +406,42 @@ export async function handleGenerateSmartForm(
     if (cloneResult.strippedMethods.length > 0) {
       noteLines.push(`   Methods stripped (re-add what you need via d365fo_file(action="modify") add-method): ${cloneResult.strippedMethods.join(', ')}`);
     }
+    if (cloneResult.clearedSourceCodeMirror) {
+      noteLines.push(`   SourceCode datasource/control method mirror cleared (stale field/control method holders)`);
+    }
+    if (cloneResult.resetClassDeclaration) {
+      noteLines.push(`   classDeclaration body reset to empty (source member vars/macros dropped with the methods)`);
+    }
+    if (cloneResult.removedIndexes.length > 0) {
+      noteLines.push(`   Default datasource index dropped (source-table index): ${cloneResult.removedIndexes.map(i => `${i.dataSource}.${i.index}`).join(', ')}`);
+    }
     if (cloneResult.droppedFields.length > 0) {
       noteLines.push(`   ⚠️ Fields dropped (missing on target table): ${cloneResult.droppedFields.map(d => `${d.dataSource}.${d.field}`).join(', ')}`);
+    }
+    // Poor-match guard: if a re-bound datasource lost most of its fields, the
+    // reference form's table is structurally unrelated to the target — the clone
+    // is likely unusable. Flag it loudly so the caller picks a closer reference
+    // or scaffolds from a template instead of silently shipping a gutted form.
+    const poorMatches = cloneResult.fieldStats.filter(s => s.total >= 3 && s.dropped / s.total >= 0.6);
+    if (poorMatches.length > 0) {
+      noteLines.push(
+        `   🛑 POOR CLONE MATCH — ${poorMatches.map(s => `${s.dataSource}: ${s.dropped}/${s.total} fields dropped`).join('; ')}. ` +
+        `The reference form "${cloneResult.sourceFormName}" is bound to a table unrelated to your target, so most controls were stripped. ` +
+        `Pick a reference form over a structurally similar table (object_patterns(domain="form", action="analyze", recommend={...}) suggests one), ` +
+        `or scaffold from a template: generate_object(mode="scaffold", objectType="form", formPattern="...", dataSource="...").`,
+      );
     }
     if (cloneResult.removedControls.length > 0) {
       noteLines.push(`   ⚠️ Controls removed (bound to dropped fields): ${cloneResult.removedControls.join(', ')}`);
     }
+    for (const rq of cloneResult.repointedQuickFilters) {
+      noteLines.push(rq.to
+        ? `   QuickFilter default column repointed: ${rq.from} → ${rq.to}`
+        : `   ⚠️ QuickFilter default column "${rq.from}" was removed and no surviving column was found — set defaultColumnName manually`);
+    }
+    // Pattern-compatibility pre-check (see cloneFromPatternMismatchWarning).
+    const mismatch = cloneFromPatternMismatchWarning(formPattern, xml, cloneResult.sourceFormName);
+    if (mismatch) noteLines.push(`   ${mismatch}`);
     cloneNotes = `\n${noteLines.join('\n')}`;
   } else {
     xml = FormPatternTemplates.build(normalizedPattern, {
@@ -388,6 +451,41 @@ export async function handleGenerateSmartForm(
       caption: caption || label || finalName,
       gridFields,
     });
+
+    // Align the Design-level PatternVersion with the version this environment uses
+    // for the pattern; template defaults can lag and be rejected by BP.
+    const designPattern = xml.match(/<Pattern xmlns="">([^<]+)<\/Pattern>/)?.[1];
+
+    // Warn when the requested pattern has no dedicated template and silently
+    // degraded to another base (or to SimpleList). The emitted <Pattern> reflects
+    // the template, not the request, and the self-test validates only the emitted
+    // pattern — so this mismatch would otherwise pass unnoticed.
+    if (formPattern && designPattern) {
+      const intended = resolvePattern(formPattern);
+      if (intended && intended.xmlName.toLowerCase() !== designPattern.toLowerCase()) {
+        const ref = intended.referenceForms?.[0];
+        cloneNotes +=
+          `\n   ⚠️ No dedicated template for pattern "${intended.xmlName}" — generated a "${designPattern}" form instead.` +
+          (ref
+            ? ` For a true "${intended.xmlName}", clone a reference form: ` +
+              `generate_object(mode="scaffold", objectType="form", name="${name}", cloneFrom="${ref}", tableMapping={...}).`
+            : ` Clone a reference form for that pattern via cloneFrom=.`);
+      }
+    }
+
+    if (designPattern) {
+      const envVersion = resolveEnvPatternVersion(symbolIndex.getReadDb(), designPattern);
+      if (envVersion) {
+        const current = xml.match(/<PatternVersion xmlns="">([^<]*)<\/PatternVersion>/)?.[1];
+        if (current && current !== envVersion) {
+          xml = xml.replace(
+            /(<PatternVersion xmlns="">)[^<]*(<\/PatternVersion>)/,
+            `$1${envVersion}$2`,
+          );
+          cloneNotes += `\n   PatternVersion aligned to this environment: ${current} → ${envVersion}`;
+        }
+      }
+    }
   }
 
   // Optional lifecycle method stubs (pattern-appropriate, with TODO markers)
@@ -429,6 +527,32 @@ export async function handleGenerateSmartForm(
       `\n   ⚠️ Pattern validation found ${patternErrors.length} error(s) in the cloned XML ` +
       `(d365fo_file(action="create") will block them while FORM_PATTERN_ENFORCE=true):\n` +
       errorList.split('\n').map(l => `      ${l}`).join('\n');
+  }
+
+  // Warn when a datasource is bound to a table that does not exist in the index,
+  // suggesting the closest real table name.
+  try {
+    const db = symbolIndex.getReadDb();
+    const tableExists = db.prepare(
+      `SELECT 1 FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
+    );
+    const seenTables = new Set<string>();
+    for (const m of xml.matchAll(/<Table>([^<]+)<\/Table>/g)) {
+      const table = m[1].trim();
+      if (!table || seenTables.has(table.toLowerCase())) continue;
+      seenTables.add(table.toLowerCase());
+      if (tableExists.get(table)) continue;
+      const stem = table.replace(/s$/i, '');
+      const alt = db.prepare(
+        `SELECT name FROM symbols WHERE type = 'table' AND name LIKE ? COLLATE NOCASE ORDER BY LENGTH(name) ASC LIMIT 1`,
+      ).get(`${stem}%`) as { name: string } | undefined;
+      cloneNotes +=
+        `\n   ⚠️ Datasource table "${table}" not found in the index` +
+        (alt && alt.name.toLowerCase() !== table.toLowerCase() ? ` — did you mean "${alt.name}"?` : '') +
+        ` The form will not build until that table exists or the datasource is re-pointed.`;
+    }
+  } catch {
+    /* index unavailable — skip the existence check */
   }
 
   // On non-Windows (Azure/Linux) — return XML as text, no file write possible.
@@ -560,6 +684,26 @@ export async function handleGenerateSmartForm(
       },
     ],
   };
+}
+
+/**
+ * The most common Design-level PatternVersion this environment uses for a form
+ * pattern, from mined form_patterns data. Returns null when no mined data exists.
+ */
+export function resolveEnvPatternVersion(db: any, patternXmlName: string): string | null {
+  try {
+    const row = db.prepare(`
+      SELECT pattern_version, COUNT(*) AS n
+      FROM form_patterns
+      WHERE node_path = 'Design' AND pattern = ? AND pattern_version IS NOT NULL AND pattern_version != ''
+      GROUP BY pattern_version
+      ORDER BY n DESC
+      LIMIT 1
+    `).get(patternXmlName) as { pattern_version: string } | undefined;
+    return row?.pattern_version ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // extractModelFromProject and findProjectInSolution moved to ../utils/projectUtils.ts
