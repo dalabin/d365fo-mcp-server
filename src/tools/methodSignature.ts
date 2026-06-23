@@ -78,7 +78,7 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
       };
     }
 
-    // 2. Find the method in database
+    // 2. Find the method in database (advisory — delegates and SubscribesTo handlers may be absent)
     const methodStmt = rdb.prepare(`
       SELECT name, signature, parent_name, file_path
       FROM symbols
@@ -89,10 +89,6 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
     `);
 
     const methodRow = methodStmt.get(methodName, className);
-
-    if (!methodRow) {
-      throw new Error(`Method "${methodName}" not found in ${classRow.type} "${className}".`);
-    }
 
     // 3. C# bridge (IMetadataProvider — live source, always current)
     // Bridge returns full source → parse signature locally + detect obsolete.
@@ -118,6 +114,23 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
       output += `\`\`\`xpp\n${sigText}\n\`\`\`\n`;
       output += `\n> ⚠️ CoC template not available without full method source. Start the C# bridge for full functionality.\n`;
       return { content: [{ type: 'text', text: output }] };
+    }
+
+    // Method not in SQLite and not reachable via bridge/XML.
+    // Delegates and SubscribesTo handlers are commonly absent from the index.
+    if (!methodRow) {
+      return {
+        content: [{
+          type: 'text',
+          text: `❌ Method **${className}.${methodName}** not found.\n\n` +
+            `The method is not in the symbol index and could not be retrieved via bridge or XML.\n` +
+            `This is common for:\n` +
+            `- **Delegate methods** (declared with the \`delegate\` keyword)\n` +
+            `- **Event handler subscriptions** (\`[SubscribesTo]\` handlers in extension classes)\n\n` +
+            `Use \`get_object_info(objectType="class", name="${className}")\` to see all indexed methods.`,
+        }],
+        isError: true,
+      };
     }
 
     return {

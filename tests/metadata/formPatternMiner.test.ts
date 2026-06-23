@@ -68,6 +68,13 @@ describe('normalizeControlType', () => {
     expect(normalizeControlType('AxFormControl')).toBe('');
     expect(normalizeControlType(undefined)).toBe('');
   });
+
+  it('preserves Control suffix for extension control types', () => {
+    // QuickFilterControl is an extension control — its full name must be preserved
+    // so it matches FormControlExtension.Name lookups in the validator.
+    expect(normalizeControlType('AxFormQuickFilterControl')).toBe('QuickFilterControl');
+    expect(normalizeControlType('AxFormSegmentedEntryControl')).toBe('SegmentedEntryControl');
+  });
 });
 
 // ─── walkFormDesign on SimpleList template ───────────────────────────────────

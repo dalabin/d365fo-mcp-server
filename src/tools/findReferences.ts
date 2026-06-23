@@ -11,7 +11,9 @@ import { buildObjectTypeMismatchMessage, detectObjectTypeInDb } from '../utils/m
 import { tryBridgeReferences } from '../bridge/bridgeAdapter.js';
 
 const FindReferencesArgsSchema = z.object({
-  targetName: z.string().describe('Name of the target. For a precise, type-scoped method where-used, qualify it as "Owner.method" (e.g. "SalesTable.initFromSalesQuotationTable") or pass an AOT path ("/Tables/SalesTable/Methods/initFromSalesQuotationTable"). A bare method name matches that name on every type.'),
+  // Accept "name" as an alias for "targetName" — agents frequently confuse the two.
+  targetName: z.string().optional().describe('Name of the target. For a precise, type-scoped method where-used, qualify it as "Owner.method" (e.g. "SalesTable.initFromSalesQuotationTable") or pass an AOT path ("/Tables/SalesTable/Methods/initFromSalesQuotationTable"). A bare method name matches that name on every type.'),
+  name: z.string().optional().describe('Alias for targetName.'),
   targetType: z.enum(['method', 'class', 'table', 'field', 'enum', 'all']).optional().describe('Type of the target to search for'),
   ownerName: z.string().optional().describe('Declaring table/class/form that owns the method, when targetName is just the bare method name. Used to scope the where-used to a single type (matches Visual Studio xref).'),
   scope: z.enum(['all', 'workspace', 'standard', 'custom']).optional().default('all').describe('Search scope'),
@@ -19,7 +21,7 @@ const FindReferencesArgsSchema = z.object({
   // Default OFF: code-context snippets roughly quadruple the token cost of this tool.
   // Agents typically only need file:line:type — turn context on explicitly when you need snippets.
   includeContext: z.boolean().optional().default(false).describe('Include code context around reference (opt-in to reduce token usage)'),
-});
+}).refine(a => a.targetName || a.name, { message: "must have required property 'targetName'" });
 
 /**
  * Map a symbol-index `type` value to its DYNAMICSXREFDB container segment.
@@ -83,7 +85,8 @@ export async function findReferencesTool(request: CallToolRequest, context: XppS
   try {
     const args = FindReferencesArgsSchema.parse(request.params.arguments);
     const { symbolIndex } = context;
-    const { targetName, targetType, scope, limit, includeContext, ownerName } = args;
+    const { targetType, scope, limit, includeContext, ownerName } = args;
+    const targetName = (args.targetName ?? args.name)!; // accept "name" alias
 
     // --- Parse the target shape ----------------------------------------------
     // Accept three forms:

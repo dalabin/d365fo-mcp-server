@@ -107,12 +107,22 @@ function asArray<T>(value: T | T[] | undefined | null): T[] {
   return [value];
 }
 
-/** 'AxFormGridControl' → 'Grid', 'AxFormActionPaneControl' → 'ActionPane', 'AxFormControl' → '' */
+/**
+ * Extension control type names that end in 'Control' and must NOT have the suffix stripped,
+ * because they are identified by that full name via FormControlExtension.Name in the validator.
+ */
+const EXTENSION_CONTROL_NAMES = new Set(['QuickFilterControl', 'SegmentedEntryControl']);
+
+/**
+ * 'AxFormGridControl' → 'Grid', 'AxFormActionPaneControl' → 'ActionPane', 'AxFormControl' → ''
+ * Exception: extension controls like 'QuickFilterControl' keep their full suffix so they
+ * match FormControlExtension.Name lookups used by the form pattern validator.
+ */
 export function normalizeControlType(axType: string | undefined): string {
   if (!axType) return '';
   let t = axType;
   if (t.startsWith('AxForm')) t = t.slice('AxForm'.length);
-  if (t.endsWith('Control')) t = t.slice(0, -'Control'.length);
+  if (t.endsWith('Control') && !EXTENSION_CONTROL_NAMES.has(t)) t = t.slice(0, -'Control'.length);
   return t;
 }
 
