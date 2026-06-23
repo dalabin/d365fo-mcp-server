@@ -93,6 +93,26 @@ describe('resolveBestEdt (DB-aware)', () => {
     // The guard only blocks FUZZY matches; an exact same-name EDT is honored.
     expect(resolveBestEdt('Category', fakeDb(['Category', 'ProjCategoryId']))).toBe('Category');
   });
+
+  it('returns the fieldName itself when it looks like a custom PascalCase EDT not in the index', () => {
+    // When a user passes a custom EDT name that was just created (not yet indexed),
+    // resolveBestEdt should trust the input rather than silently defaulting to String255.
+    // This only fires when no specific heuristic matches (e.g. a plain ID field).
+    // The edtWarnings system in the caller validates it separately.
+    const db = fakeDb([]); // empty index — custom EDT not indexed yet
+    expect(resolveBestEdt('ContosoRentEquipmentId', db)).toBe('ContosoRentEquipmentId');
+    expect(resolveBestEdt('ContosoRentAgreementId', db)).toBe('ContosoRentAgreementId');
+    // Note: ContosoRentDailyRate still maps to AmountMST via the 'rate' heuristic — correct behavior.
+    expect(resolveBestEdt('ContosoRentDailyRate', db)).toBe('AmountMST');
+  });
+
+  it('does NOT return the fieldName for generic single-word fields even if PascalCase', () => {
+    // Generic single-word fields (status, category, type…) must still fall through to
+    // String255 — they are not EDTs, just column names for which we cannot infer a type.
+    const db = fakeDb([]);
+    expect(resolveBestEdt('Status', db)).toBe('String255');
+    expect(resolveBestEdt('Category', db)).toBe('String255');
+  });
 });
 
 describe('isInfrastructureField', () => {

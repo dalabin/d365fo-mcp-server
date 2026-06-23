@@ -981,7 +981,7 @@ export async function handleGenerateSmartTable(
  * Returns a base type string compatible with fieldTypeToAxType(), e.g.:
  *   "Qty" → "Real", "TransDate" → "Date", "ItemId" → "String"
  */
-function resolveEdtBaseType(edtName: string, db: any, depth = 0): string {
+function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undefined {
   // D365FO primitive types − these map directly to AxTableField types
   const PRIMITIVES = new Set([
     'String', 'Integer', 'Int64', 'Real', 'Date', 'UtcDateTime', 'DateTime',
@@ -997,7 +997,10 @@ function resolveEdtBaseType(edtName: string, db: any, depth = 0): string {
       `SELECT extends, enum_type FROM edt_metadata WHERE edt_name = ? LIMIT 1`
     ).get(edtName) as { extends: string | null; enum_type: string | null } | undefined;
 
-    if (!row) return 'String';
+    // EDT not found in the index (e.g. a custom EDT not yet indexed, or a standard OOB EDT
+    // whose index wasn't loaded). Return undefined so callers fall back to EDT-name heuristics
+    // in getAxTableFieldType() instead of blindly defaulting to AxTableFieldString.
+    if (!row) return undefined;
     // Enum-based EDT: extends is null but enum_type is set (e.g. SalesStatus, PurchStatus)
     if (row.enum_type && !row.extends) return 'Enum';
     if (!row.extends) return 'String';
@@ -1006,7 +1009,7 @@ function resolveEdtBaseType(edtName: string, db: any, depth = 0): string {
     // Follow chain to the parent EDT
     return resolveEdtBaseType(row.extends, db, depth + 1);
   } catch {
-    return 'String';
+    return undefined;
   }
 }
 
@@ -1116,6 +1119,13 @@ export function resolveBestEdt(fieldName: string, db: any): string {
     if (acceptFuzzy && best && bestConf >= 0.8) return best;
 
     const heuristic = suggestEdtFromFieldName(fieldName);
+    // If the heuristic only fell back to the generic String255, and the fieldName itself
+    // looks like a PascalCase custom EDT (starts uppercase, ≥5 chars, non-generic), return
+    // the fieldName directly — it's likely a custom EDT not yet in the index.
+    // The edtWarnings system will validate it later and warn if it truly doesn't exist.
+    if (heuristic === 'String255' && acceptFuzzy && /^[A-Z]/.test(fieldName) && fieldName.length >= 5) {
+      return fieldName;
+    }
     if (validateEdtExists(heuristic, db)) return heuristic;
 
     if (acceptFuzzy && best && bestConf >= 0.6) return best;
