@@ -603,11 +603,11 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     if (args.oldCode) args.oldCode = decodeXmlEntitiesFromXppSource(args.oldCode);
 
     // objectName is optional when filePath is given — derive it from the file
-    // basename so callers don't have to pass the name redundantly (the bridge
-    // resolves objects by name, which an explicit filePath already determines).
+    // basename using path.win32.basename (handles Windows backslash paths on
+    // all platforms — path.posix.basename treats '\\' as a regular character).
     if (!args.objectName) {
       if (args.filePath) {
-        args.objectName = path.basename(args.filePath, '.xml');
+        (args as any).objectName = path.win32.basename(args.filePath, '.xml');
       } else {
         return {
           content: [{
@@ -676,7 +676,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       workspacePath,
       filePath: explicitFilePath,
     } = args;
-    // Non-null: guaranteed set above (derived from filePath when omitted).
+    // objectName guaranteed non-null by the derivation block above.
+    // Declared as `let` so it can be corrected from the resolved file basename below.
     let objectName = args.objectName!;
 
     // ── Auto-resolve parentControl for add-control on form-extension ─────────
@@ -858,11 +859,12 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
 
     // 3b. Derive the authoritative object name from the resolved file path.
     //     The caller may pass objectName="RentEquipment" while the file on disk
-    //     is AslRentEquipment.xml (auto-prefixed at create time).  The C# bridge
+    //     is AslRentEquipment.xml (auto-prefixed at create time). The C# bridge
     //     resolves objects by name from its metadata model — if the name doesn't
     //     match the file it will always return null, regardless of refreshes.
-    //     We use the XML filename (without extension) as the ground truth.
-    const fileBaseName = path.basename(actualFilePath, '.xml');
+    //     Use path.win32.basename so Windows backslash paths are handled correctly
+    //     on all platforms (path.posix.basename treats '\\' as a regular character).
+    const fileBaseName = path.win32.basename(actualFilePath, '.xml');
     const bridgeObjectName = fileBaseName !== objectName ? fileBaseName : objectName;
     if (bridgeObjectName !== objectName) {
       console.error(

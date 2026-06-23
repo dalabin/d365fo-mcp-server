@@ -984,4 +984,117 @@ describe('modify_d365fo_file', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/bridge is not available/i);
   });
+
+  it('add-index maps indexFields objects to a flat field-name string[] for the bridge', async () => {
+    // Regression: indexFields is documented as [{fieldName, direction?}] but the bridge
+    // expects a flat string[]. Without mapping, C# receives [{fieldName:…}] deserialized
+    // as List<string> with null entries — silently creates an index with no fields.
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      addIndex,
+      validateObject: vi.fn(async () => null),
+    };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        indexAllowDuplicates: false,
+        indexAlternateKey: true,
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addIndex).toHaveBeenCalledTimes(1);
+    const [tableName, indexName, fields, allowDuplicates, alternateKey] = addIndex.mock.calls[0];
+    expect(tableName).toBe('AslRentEquipmentTable');
+    expect(indexName).toBe('EquipmentIdx');
+    // The critical assertion: a flat array of strings, not [{ fieldName }] objects.
+    expect(fields).toEqual(['AslRentEquipmentId']);
+    expect(allowDuplicates).toBe(false);
+    expect(alternateKey).toBe(true);
+  });
+
+  it('add-relation maps relationConstraints {fieldName,relatedFieldName} to {field,relatedField}', async () => {
+    // Regression: relationConstraints is documented as [{fieldName, relatedFieldName}] but the
+    // C# WriteRelationConstraint deserializes {field, relatedField}. Without remapping, C# sees
+    // null keys and silently writes a relation with empty constraints.
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addRelation = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      addRelation,
+      validateObject: vi.fn(async () => null),
+    };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-relation',
+        relationName: 'AslRentCategory',
+        relatedTable: 'AslRentCategoryTable',
+        relationConstraints: [{ fieldName: 'CategoryId', relatedFieldName: 'CategoryId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addRelation).toHaveBeenCalledTimes(1);
+    const [, , , constraints] = addRelation.mock.calls[0];
+    expect(constraints).toEqual([{ field: 'CategoryId', relatedField: 'CategoryId' }]);
+  });
+
+  it('derives objectName from filePath when objectName is omitted', async () => {
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, validateObject: vi.fn(async () => null) };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        // objectName intentionally omitted — must be derived from filePath basename
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addIndex).toHaveBeenCalledTimes(1);
+    expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+  });
+
+  it('errors clearly when both objectName and filePath are omitted', async () => {
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', { objectType: 'table', operation: 'add-index', indexName: 'X', indexFields: [{ fieldName: 'Y' }] }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/objectName|filePath/);
+  });
 });
