@@ -785,7 +785,7 @@ ${gridPanelFieldControls}\t\t\t\t\t\t\t\t</Controls>
       dsName = formName,
       dsTable = dsName,
       caption,
-      linesDsName = `${dsName}Lines`,
+      linesDsName = `${dsName.replace(/Table$/i, '')}Line`,
       linesDsTable = linesDsName,
       gridFields = [],
       linesFields = [],

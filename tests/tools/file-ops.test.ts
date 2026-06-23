@@ -979,6 +979,41 @@ describe('modify_d365fo_file', () => {
     expect(source).not.toContain('&lt;');
   });
 
+  it('add-method skips class/extension declaration block and adds the real methods', async () => {
+    // Regression #4: agent passes classDeclaration + multiple method bodies in one sourceCode.
+    // The class declaration block has no method signature ("final class Foo_Extension {}") so
+    // extractMethodNameFromSource returns null for it. Previously this threw; now it is silently
+    // skipped and only the actual methods are added.
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxClass><Name>AslRentAgreementTable_Extension</Name></AxClass>`,
+    );
+    const addMethod = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMethod, refreshProvider: vi.fn(), validateObject: vi.fn(async () => null) };
+
+    const classDecl = `[ExtensionOf(tableStr(AslRentAgreementTable))]\nfinal class AslRentAgreementTable_Extension\n{\n}`;
+    const method1  = `public void validateStatus()\n{\n    // TODO\n}`;
+    const method2  = `public void computeTotals()\n{\n    // TODO\n}`;
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentAgreementTable_Extension',
+        operation: 'add-method',
+        sourceCode: `${classDecl}\n\n${method1}\n\n${method2}`,
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxClass\\AslRentAgreementTable_Extension.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    // Class declaration block is skipped; only the 2 real methods are added.
+    expect(addMethod).toHaveBeenCalledTimes(2);
+    const names = addMethod.mock.calls.map((c: any[]) => c[2]);
+    expect(names).toContain('validateStatus');
+    expect(names).toContain('computeTotals');
+  });
+
   it('replace-code returns bridge-required error when oldCode is not found (no bridge)', async () => {
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(

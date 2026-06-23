@@ -543,12 +543,17 @@ describe('Form pattern edge cases', () => {
     expect(hasNamedControl(xml, 'Tab')).toBe(true);
   });
 
-  it('DetailsTransaction uses default linesDsName when not provided', () => {
-    const xml = FormPatternTemplates.buildDetailsTransaction({
+  it('DetailsTransaction uses D365FO-correct default linesDsName when not provided', () => {
+    // SalesTable → SalesLine, Order → OrderLine  (strips Table suffix, adds singular Line)
+    const xmlTable = FormPatternTemplates.buildDetailsTransaction({
+      formName: 'SalesForm', dsName: 'SalesTable', dsTable: 'SalesTable',
+    });
+    expect(xmlTable).toContain('<Name>SalesLine</Name>');
+
+    const xmlNoSuffix = FormPatternTemplates.buildDetailsTransaction({
       formName: 'OrderForm', dsName: 'Order', dsTable: 'OrderTable',
     });
-    // Default: dsName + "Lines"
-    expect(xml).toContain('<Name>OrderLines</Name>');
+    expect(xmlNoSuffix).toContain('<Name>OrderLine</Name>');
   });
 
   it('caption is optional and omitted correctly', () => {

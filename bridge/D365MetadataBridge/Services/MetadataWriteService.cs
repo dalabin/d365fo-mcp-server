@@ -41,7 +41,16 @@ namespace D365MetadataBridge.Services
         // ========================
 
         /// <summary>
-        /// Resolves a model name to ModelSaveInfo by reading model descriptor XML files.
+        /// Resolves a model name to ModelSaveInfo.
+        ///
+        /// PREFERRED: the provider's model manifest, which gives the model's real runtime
+        /// identity — the small ordinal Id AND the SequenceId. This matters because the
+        /// model descriptor's &lt;Id&gt; element is actually the SequenceId (a large number);
+        /// parsing it into ModelSaveInfo.Id while leaving SequenceId=0 makes
+        /// IMetadataProvider.Create() throw NullReferenceException. (Verified: fm-mcp manifest
+        /// Id=116 SequenceId=896000930 creates fine; descriptor-derived Id=896000930
+        /// SequenceId=0 NREs.) The descriptor scan stays as a fallback for models the
+        /// manifest does not enumerate (e.g. not yet built/registered).
         /// Caches results for repeated calls.
         /// </summary>
         public ModelSaveInfo? ResolveModelSaveInfo(string modelName)
@@ -49,6 +58,13 @@ namespace D365MetadataBridge.Services
             if (_modelCache.TryGetValue(modelName, out var cached))
                 return cached;
 
+            // Preferred: authoritative identity from the runtime model manifest.
+            var fromManifest = ResolveModelSaveInfoFromManifest(modelName);
+            if (fromManifest != null) { _modelCache[modelName] = fromManifest; return fromManifest; }
+
+            // Fallback: descriptor scan. Note the Id/SequenceId caveat above — this path
+            // can yield a ModelSaveInfo the create API rejects, but it is the best we can do
+            // when the model is absent from the manifest.
             // Scan {packagesPath}/{*}/Descriptor/{modelName}.xml
             // First try the direct path (most models: package name = model name)
             var directPath = Path.Combine(_packagesPath, modelName, "Descriptor", modelName + ".xml");
@@ -78,6 +94,30 @@ namespace D365MetadataBridge.Services
                 Console.Error.WriteLine($"[WriteService] Error scanning model descriptors: {ex.Message}");
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// Resolves ModelSaveInfo from the provider's model manifest by model name, capturing
+        /// the real runtime Id + SequenceId (see ResolveModelSaveInfo remarks). Returns null
+        /// when the model is not enumerated by the manifest.
+        /// </summary>
+        private ModelSaveInfo? ResolveModelSaveInfoFromManifest(string modelName)
+        {
+            try
+            {
+                var manifest = _provider.ModelManifest;
+                if (manifest == null) return null;
+                foreach (var mi in manifest.ListModelInfos())
+                {
+                    if (string.Equals(mi.Name, modelName, StringComparison.OrdinalIgnoreCase))
+                        return new ModelSaveInfo { Id = mi.Id, Layer = mi.Layer, Name = mi.Name, SequenceId = mi.SequenceId };
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[WriteService] Manifest model lookup failed for '{modelName}': {ex.Message}");
+            }
             return null;
         }
 

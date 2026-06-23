@@ -704,7 +704,7 @@ export async function handleGenerateSmartForm(
       caption: caption || label || finalName,
       gridFields,
       fieldTypes,
-      linesDsName: linesTableResolved ? (linesDataSource || linesTableResolved) : undefined,
+      linesDsName: linesDsNameResolved ?? (linesTableResolved || undefined),
       linesDsTable: linesTableResolved || undefined,
       linesFields,
       linesFieldTypes,

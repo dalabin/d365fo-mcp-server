@@ -425,7 +425,7 @@ namespace D365MetadataBridge.Protocol
                                 default:
                                     throw new ArgumentException($"createObject not supported for '{objectType}' via bridge — use XML fallback");
                             }
-                        });
+                        }, true);
 
                     case "createsmarttable":
                         return HandleWrite(request, () =>
@@ -445,7 +445,7 @@ namespace D365MetadataBridge.Protocol
                                 request.GetParam<System.Collections.Generic.List<WriteRelationParam>>("relations"),
                                 request.GetParam<System.Collections.Generic.List<WriteMethodParam>>("methods"),
                                 request.GetDictParam("extraProperties"));
-                        });
+                        }, true);
 
                     case "addmethod":
                         return HandleWrite(request, () =>
@@ -787,7 +787,7 @@ namespace D365MetadataBridge.Protocol
             }
         }
 
-        private Task<BridgeResponse> HandleWrite(BridgeRequest request, Func<object?> handler)
+        private Task<BridgeResponse> HandleWrite(BridgeRequest request, Func<object?> handler, bool refreshAfterSuccess = false)
         {
             if (_writeService == null)
                 return Task.FromResult(
@@ -799,6 +799,14 @@ namespace D365MetadataBridge.Protocol
                 if (result == null)
                     return Task.FromResult(
                         BridgeResponse.CreateError(request.Id, -32001, "Write operation returned null"));
+
+                // Refresh the provider after create operations so subsequent reads (e.g. get_object_info)
+                // see the correct metadata (TableGroup, fields, etc.) rather than a stale cache state.
+                if (refreshAfterSuccess && _metadataService != null)
+                {
+                    try { _metadataService.RefreshProvider(); }
+                    catch (Exception ex) { Console.Error.WriteLine($"[WARN] Auto-refresh after {request.Method} failed: {ex.Message}"); }
+                }
 
                 return Task.FromResult(BridgeResponse.CreateSuccess(request.Id, result));
             }
@@ -815,7 +823,7 @@ namespace D365MetadataBridge.Protocol
                 // to the MCP client) so it doesn't surface as an alarming warning. The
                 // error response is still returned so the caller falls back to XML.
                 if (IsRecoverableWrite(request.Method))
-                    Console.Error.WriteLine($"[INFO] {request.Method} failed (recoverable — caller falls back to XML generation): {ex.Message}");
+                    Console.Error.WriteLine($"[INFO] {request.Method} failed (recoverable — caller falls back to XML generation): {ex.Message}\n{ex.StackTrace}");
                 else
                     Console.Error.WriteLine($"[ERROR] {request.Method}: {ex.Message}\n{ex.StackTrace}");
                 return Task.FromResult(

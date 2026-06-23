@@ -433,6 +433,28 @@ describe('generate_smart_table', () => {
     );
     expect(result?.content[0].text).toMatch(/<Indexes>|UniqueIndex|Idx/i);
   });
+
+  it('preserves both fields when the same hint name appears twice (dedup regression #2)', async () => {
+    // Agent passed the EDT name twice ("AmountMST, AmountMST") instead of distinct
+    // field names. The second occurrence must be renamed AmountMST2, not dropped.
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'RentalLine',
+        modelName: 'MyModel',
+        fieldsHint: 'AgreementId, AmountMST, AmountMST',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    // Both amount fields present under different names
+    expect(xml).toContain('AmountMST');
+    expect(xml).toContain('AmountMST2');
+    // Not silently collapsed to a single AmountMST
+    const count = (xml.match(/AmountMST(?!2)/g) ?? []).length;
+    expect(count).toBeGreaterThanOrEqual(1); // original present
+    expect(xml).toContain('AmountMST2');     // duplicate renamed
+  });
 });
 
 // ─── generate_smart_form ─────────────────────────────────────────────────────

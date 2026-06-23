@@ -259,6 +259,20 @@ export class BridgeClient extends EventEmitter {
       // cannot corrupt the state of its successor.
       const child = this.process;
 
+      // Guard the child's stdio streams against unhandled 'error' events. When the
+      // bridge process dies mid-write (e.g. a crash during createSmartTable), Node
+      // can emit EPIPE/ECONNRESET on stdin/stdout/stderr. A stream that emits
+      // 'error' with no listener throws as an uncaughtException and would take the
+      // whole MCP server down ("crashes on the first request"). Recovery is driven
+      // by the 'error'/'exit' handlers on the child below; here we just absorb the
+      // stream-level noise so it never becomes fatal.
+      const onStreamError = (where: string) => (err: Error) => {
+        console.error(`[BridgeClient] ${where} stream error: ${err.message}`);
+      };
+      child.stdin?.on('error', onStreamError('stdin'));
+      child.stdout?.on('error', onStreamError('stdout'));
+      child.stderr?.on('error', onStreamError('stderr'));
+
       // Handle stdout — newline-delimited JSON
       child.stdout!.on('data', (chunk: Buffer) => {
         if (this.process !== child) return;

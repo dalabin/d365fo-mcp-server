@@ -1008,6 +1008,16 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             for (const body of bodies) {
               const mName = extractMethodNameFromSource(body);
               if (!mName) {
+                // A body without a derivable method name is typically a class/extension declaration
+                // (e.g. "[ExtensionOf(tableStr(T))] final class T_Extension { }"). Such blocks are
+                // NOT methods and do not belong in add-method — skip and continue.
+                // The regex handles: optional attribute block(s) → optional modifiers (final/abstract/
+                // public/static/…) → class or interface keyword.
+                const trimmed = body.trim();
+                if (/^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|private|protected|final|abstract|static|internal|sealed)\s+)*(?:class|interface)\b/i.test(trimmed)) {
+                  console.warn(`[add-method] Skipping class/interface declaration block (not a method): ${trimmed.slice(0, 80)}...`);
+                  continue;
+                }
                 throw new Error(
                   `⛔ add-method: could not derive a method name from one of the ${bodies.length} method bodies. ` +
                   `Ensure each method has a complete signature (e.g. "public void foo()").`,

@@ -84,6 +84,28 @@ console.error = (...args: any[]) => {
   }
 };
 
+// ─── Global safety net ────────────────────────────────────────────────────────
+// An unhandled promise rejection terminates the Node process by default
+// (Node ≥15, --unhandled-rejections=throw). In stdio mode that kills the MCP
+// subprocess and the client must restart it — observed as "the server crashes
+// on the first request and has to be restarted" when a background task (e.g.
+// the async DB load) rejects before any tool call awaits it. Log and keep the
+// server alive instead of dying. (stderr is already tee'd to LOG_FILE above.)
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.stderr.write(`[d365fo-mcp] ⚠️ Unhandled promise rejection (server staying up): ${msg}\n`);
+});
+
+// Same protection for SYNCHRONOUS uncaught exceptions — a throw that escapes a
+// timer/stream/event callback (not an awaited promise) would otherwise stop the
+// process outright. For a stdio server that means the MCP client must respawn
+// the subprocess after the very first failing request. Log the full stack so the
+// root cause is diagnosable, then keep serving. (Genuinely fatal startup errors
+// are still surfaced via main().catch → process.exit below.)
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[d365fo-mcp] ⚠️ Uncaught exception (server staying up): ${err?.stack ?? err}\n`);
+});
+
 const PORT = parseInt(process.env.PORT || '8080');
 // Derive server root from this file's location so paths are absolute
 // regardless of process.cwd() — critical when VS Code launches this as stdio subprocess.
@@ -511,6 +533,12 @@ async function main() {
       resolveDbReady = res;
       rejectDbReady  = rej;
     });
+    // Floor handler: if the background DB load fails before any tool call awaits
+    // dbReady (e.g. the first request is a LOCAL tool, which skips the wait in
+    // toolHandler), the rejection would otherwise float and crash the stdio
+    // process. Attaching a catch here marks it handled; tool handlers that do
+    // await context.dbReady still receive and surface the rejection themselves.
+    dbReadyPromise.catch(() => { /* handled — never let it float */ });
 
     const stubContext: import('./types/context.js').XppServerContext = {
       symbolIndex: stubIndex,

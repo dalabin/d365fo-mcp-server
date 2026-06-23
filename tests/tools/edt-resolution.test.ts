@@ -4,6 +4,7 @@ import {
   suggestEdtFromFieldName,
   isInfrastructureField,
   heuristicEdtBaseType,
+  resolveEdtBaseType,
   isEnumName,
 } from '../../src/tools/generateSmartTable';
 
@@ -137,6 +138,49 @@ describe('heuristicEdtBaseType (fallback when EDT not indexed)', () => {
   it('returns undefined for names with no recognizable base type', () => {
     expect(heuristicEdtBaseType('ContosoRentEquipmentId')).toBeUndefined();
     expect(heuristicEdtBaseType('Name')).toBeUndefined();
+  });
+});
+
+describe('resolveEdtBaseType (indexed EDT, root-EDT ambiguity)', () => {
+  // Fake edt_metadata over a {name: {extends, enum_type, string_size}} map.
+  function edtMetaDb(rows: Record<string, { extends?: string | null; enum_type?: string | null; string_size?: string | number | null }>) {
+    return {
+      prepare(_sql: string) {
+        return {
+          get(arg: string) {
+            const key = Object.keys(rows).find(k => k.toLowerCase() === String(arg).toLowerCase());
+            if (!key) return undefined;
+            const r = rows[key];
+            return { extends: r.extends ?? null, enum_type: r.enum_type ?? null, string_size: r.string_size ?? null };
+          },
+        };
+      },
+    };
+  }
+
+  it('does NOT mislabel a root Date/Real EDT as String (string_size is null → undefined)', () => {
+    // The #1 bug: TransDate/Qty are indexed with extends=null and no string_size.
+    // Returning "String" here shadowed heuristicEdtBaseType; we must return undefined
+    // so the caller's heuristic (or the bridge) resolves the real primitive.
+    const db = edtMetaDb({ TransDate: {}, RealBase: {}, Qty: { extends: 'RealBase' } });
+    expect(resolveEdtBaseType('TransDate', db)).toBeUndefined();
+    expect(resolveEdtBaseType('Qty', db)).toBeUndefined(); // chains through RealBase → ambiguous root
+  });
+
+  it('still resolves a genuine String EDT (root with a string_size)', () => {
+    const db = edtMetaDb({ Name: { string_size: 60 }, Num: { string_size: 20 } });
+    expect(resolveEdtBaseType('Name', db)).toBe('String');
+    expect(resolveEdtBaseType('Num', db)).toBe('String');
+  });
+
+  it('resolves enum-backed and primitive-extending EDTs', () => {
+    const db = edtMetaDb({ SalesStatus: { enum_type: 'SalesStatus' }, MyAmount: { extends: 'Real' } });
+    expect(resolveEdtBaseType('SalesStatus', db)).toBe('Enum');
+    expect(resolveEdtBaseType('MyAmount', db)).toBe('Real');
+  });
+
+  it('returns undefined for an EDT missing from the index', () => {
+    expect(resolveEdtBaseType('ContosoCustomId', edtMetaDb({}))).toBeUndefined();
   });
 });
 

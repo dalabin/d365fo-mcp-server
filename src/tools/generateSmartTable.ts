@@ -341,9 +341,15 @@ export async function handleGenerateSmartTable(
     const hintDb = symbolIndex.getReadDb();
 
     for (const hint of hintFields) {
-      // Check if field already exists
-      if (fields.find(f => f.name === hint)) {
-        continue;
+      // Duplicate field name in hint list (e.g. agent passed the EDT name twice: "AmountMST, AmountMST"
+      // instead of distinct field names like "DailyRate, LineAmount"). Preserve both by suffixing the
+      // second occurrence rather than silently dropping it — the caller wanted two separate fields.
+      let fieldName = hint;
+      if (fields.find(f => f.name === fieldName)) {
+        let suffix = 2;
+        while (fields.find(f => f.name === `${hint}${suffix}`)) suffix++;
+        fieldName = `${hint}${suffix}`;
+        console.warn(`[generateSmartTable] Duplicate hint "${hint}" → renamed to "${fieldName}"`);
       }
 
       const edt = resolveBestEdt(hint, hintDb);
@@ -359,7 +365,7 @@ export async function handleGenerateSmartTable(
         hintLower === 'num' ||
         hintLower === 'code';
       fields.push({
-        name: hint,
+        name: fieldName,
         edt,
         mandatory: isMandatory,
       });
@@ -408,10 +414,16 @@ export async function handleGenerateSmartTable(
         continue;
       }
       if (f.edt && !f.type) {
-        // Prefer the indexed base type; when the EDT isn't indexed (same-session or
-        // an OOB EDT whose metadata wasn't loaded) fall back to a name heuristic so
-        // the bridge gets an explicit type instead of defaulting Real/Date EDTs to String.
-        f.type = resolveEdtBaseType(f.edt, db) ?? heuristicEdtBaseType(f.edt);
+        // Authoritative base type from the C# bridge (live IMetadataProvider) when
+        // available. The symbol index stores extends=null for ROOT Date/Real/Int64
+        // EDTs (e.g. TransDate→Date, Qty→Real), so resolveEdtBaseType wrongly
+        // defaulted them to String — the #1 source of "scaffold made my date/amount
+        // field a string". The bridge reads the real AxEdt element type and resolves
+        // it correctly. Fall back to the index + name heuristic only when the bridge
+        // is unavailable (Azure/Linux) or doesn't know the EDT.
+        f.type = await bridgeEdtBaseType(bridge, f.edt)
+              ?? resolveEdtBaseType(f.edt, db)
+              ?? heuristicEdtBaseType(f.edt);
       }
       // Validate EDT exists in the symbol index
       if (f.edt) {
@@ -991,15 +1003,43 @@ export async function handleGenerateSmartTable(
 }
 
 /**
+ * Resolve an EDT's primitive base type via the C# bridge (live IMetadataProvider).
+ *
+ * The bridge reads the real AxEdt element type (AxEdtDate/AxEdtReal/AxEdtInt64/…),
+ * so it correctly distinguishes a ROOT Date/Real EDT from a String one — which the
+ * symbol index CANNOT, because it stores extends=null for root EDTs regardless of
+ * their primitive. Returns a token compatible with resolveEdtBaseType
+ * (String/Integer/Real/Date/Int64/Guid/…), or undefined when the bridge is
+ * unavailable, doesn't know the EDT, or reports it as Enum (enum-backed EDTs are
+ * handled separately via the enumType path, so we must not emit a bare "Enum" here).
+ */
+async function bridgeEdtBaseType(bridge: BridgeClient | undefined, edtName: string): Promise<string | undefined> {
+  if (!bridge?.isReady) return undefined;
+  try {
+    const info = await bridge.readEdt(edtName);
+    const bt = (info as any)?.baseType;
+    if (typeof bt !== 'string' || bt.length === 0 || bt === 'Enum') return undefined;
+    return bt;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Resolve the primitive base type for a D365FO EDT by walking the edt_metadata chain.
  * The `extends` column in edt_metadata stores either a primitive type name
  * (String, Real, Int64, Date, UtcDateTime, Enum, Container, Guid, Integer) or
  * another EDT name. We follow the chain until we reach a primitive type.
  *
+ * ⚠️ Index limitation: ROOT EDTs that extend a primitive store extends=null, so this
+ * cannot tell a Date/Real root EDT from a String one and defaults such cases to
+ * String. Prefer bridgeEdtBaseType() when a bridge is available; this is the
+ * offline (Azure/Linux) fallback.
+ *
  * Returns a base type string compatible with fieldTypeToAxType(), e.g.:
  *   "Qty" → "Real", "TransDate" → "Date", "ItemId" → "String"
  */
-function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undefined {
+export function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undefined {
   // D365FO primitive types − these map directly to AxTableField types
   const PRIMITIVES = new Set([
     'String', 'Integer', 'Int64', 'Real', 'Date', 'UtcDateTime', 'DateTime',
@@ -1012,8 +1052,8 @@ function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undef
 
   try {
     const row = db.prepare(
-      `SELECT extends, enum_type FROM edt_metadata WHERE edt_name = ? LIMIT 1`
-    ).get(edtName) as { extends: string | null; enum_type: string | null } | undefined;
+      `SELECT extends, enum_type, string_size FROM edt_metadata WHERE edt_name = ? LIMIT 1`
+    ).get(edtName) as { extends: string | null; enum_type: string | null; string_size: string | number | null } | undefined;
 
     // EDT not found in the index (e.g. a custom EDT not yet indexed, or a standard OOB EDT
     // whose index wasn't loaded). Return undefined so callers fall back to EDT-name heuristics
@@ -1021,7 +1061,14 @@ function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undef
     if (!row) return undefined;
     // Enum-based EDT: extends is null but enum_type is set (e.g. SalesStatus, PurchStatus)
     if (row.enum_type && !row.extends) return 'Enum';
-    if (!row.extends) return 'String';
+    if (!row.extends) {
+      // ROOT EDT: the index does NOT record the primitive (AxEdtDate/Real/Int64/String all
+      // store extends=null). A real string EDT carries a string_size; without one we genuinely
+      // CANNOT tell String from Date/Real/Int64 — so return undefined and let the caller's
+      // name heuristic (or the bridge) decide, instead of mislabeling e.g. TransDate/Qty as
+      // String. This is the #1 "scaffold turned my date/amount field into a string" bug.
+      return row.string_size != null ? 'String' : undefined;
+    }
     if (PRIMITIVES.has(row.extends)) return row.extends;
 
     // Follow chain to the parent EDT
