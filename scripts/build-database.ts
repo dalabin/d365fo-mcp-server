@@ -30,6 +30,11 @@ const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || process.env.PACKAGES_PA
 const INCLUDE_LABELS = process.env.INCLUDE_LABELS !== 'false'; // default: true
 // Two-phase CI build: Phase 1 indexes symbols only (SKIP_FTS=true), Phase 2 runs build-fts
 const SKIP_FTS = process.env.SKIP_FTS === 'true';
+// Decouple label filtering from EXTRACT_MODE.
+// 'auto' (default) follows EXTRACT_MODE for backwards compatibility.
+// 'all' indexes all labels regardless of EXTRACT_MODE (re-indexes everything every run).
+// 'none' skips label indexing entirely.
+const LABELS_FILTER = process.env.LABELS_FILTER || 'auto';
 // Resume interrupted build: skip already-indexed models (progress tracked in _build_progress table)
 const RESUME = process.env.RESUME === 'true';
 
@@ -229,11 +234,15 @@ async function buildDatabase() {
       // For incremental builds of specific custom models, clear and re-index only those models' labels
       // For full standard rebuild, index all standard model labels (not limited to modelsToRebuild)
       const isIncrementalCustomBuild = modelsToRebuild.length > 0 && EXTRACT_MODE === 'custom';
+      const labelsAll = LABELS_FILTER === 'all';
+      const labelsNone = LABELS_FILTER === 'none';
 
       let grandTotalLabels = 0;
       let grandTotalModels = 0;
 
-      if (isIncrementalCustomBuild) {
+      if (labelsNone) {
+        console.log('   ⏭️  Skipping label indexing (LABELS_FILTER=none)');
+      } else if (isIncrementalCustomBuild && !labelsAll) {
         symbolIndex.clearLabelsForModels(modelsToRebuild);
         for (const rootPath of validRoots) {
           const { totalLabels, modelsIndexed } = await indexAllLabels(
@@ -245,9 +254,12 @@ async function buildDatabase() {
           grandTotalModels += modelsIndexed;
         }
       } else {
-        // Full rebuild — determine model filter based on EXTRACT_MODE
+        // Full rebuild — determine model filter based on EXTRACT_MODE,
+        // unless LABELS_FILTER=all forces no filter
         let labelModelFilter: ((m: string) => boolean) | undefined;
-        if (EXTRACT_MODE === 'custom') {
+        if (labelsAll) {
+          labelModelFilter = undefined;
+        } else if (EXTRACT_MODE === 'custom') {
           labelModelFilter = (m) => isCustomModel(m);
         } else if (EXTRACT_MODE === 'standard') {
           labelModelFilter = (m) => isStandardModel(m);
