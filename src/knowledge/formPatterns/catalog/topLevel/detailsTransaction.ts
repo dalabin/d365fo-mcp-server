@@ -6,6 +6,20 @@
 import type { FormPatternSpec, NodeSpec } from '../../types.js';
 import { actionPane, filterGroup } from './common.js';
 
+/**
+ * Read-only navigation list (left SidePanel grid of header records). Required by
+ * the platform's DetailsTransaction pattern from v1.4 onward; kept `optional`
+ * here so faithful clones of older header+lines forms don't false-fail.
+ */
+const navigationListPanel: NodeSpec = {
+  id: 'NavigationList',
+  controlTypes: ['Group'],
+  occurrence: 'optional',
+  nameHint: 'NavigationList',
+  properties: { Style: 'SidePanel' },
+  extraChildren: 'any',
+};
+
 const headerLinesTabs: NodeSpec = {
   id: 'HeaderLinesTabs',
   controlTypes: ['Tab'],
@@ -46,11 +60,16 @@ export const detailsTransaction: FormPatternSpec = {
   referenceForms: ['SalesTable', 'PurchTable', 'ProjInvoiceJournal'],
   designProperties: { Style: 'DetailsFormTransaction' },
   requiresDataSource: 'headerLines',
-  root: [actionPane('required'), filterGroup('optional'), headerLinesTabs],
+  root: [actionPane('required'), navigationListPanel, filterGroup('optional'), headerLinesTabs],
   extraRootChildren: 'none',
   lifecycleGuidance: [
-    'Link the lines datasource to the header datasource (JoinSource + Active link type).',
+    'Link the lines datasource to the header datasource (JoinSource + Delayed/Active link type).',
     'Override the lines datasource initValue() to default line fields from the header.',
     'Override the header datasource active() to refresh totals/line state.',
+  ],
+  notes: [
+    'From v1.4 the platform pattern requires a Navigation List (left SidePanel grid ' +
+      'of header records); the generator emits one. The catalog keeps it optional so ' +
+      'clones of older v1.x forms without one are not rejected.',
   ],
 };

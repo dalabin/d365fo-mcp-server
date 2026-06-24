@@ -66,21 +66,45 @@ console.error = (...args: any[]) => {
     return;
   }
   const firstArg = String(args[0]);
-  // Suppress only verbose debug progress from known tool handler prefixes,
-  // but NEVER suppress if the message contains error/warning indicators.
-  const isToolDebugMessage =
-    (firstArg.includes('[create_d365fo_file]') ||
-     firstArg.includes('[generate_d365fo_xml]') ||
-     firstArg.includes('[ProjectFileManager]')) &&
-    !firstArg.includes('Failed') &&
-    !firstArg.includes('Error') &&
-    !firstArg.includes('error') &&
-    !firstArg.includes('❌') &&
-    !firstArg.includes('⚠️');
-  if (!isToolDebugMessage) {
+  // Suppress verbose operational debug messages from any tool/component prefix
+  // (pattern: message starts with "[module_name]"), but NEVER suppress if the
+  // message contains error/warning indicators — those must always reach the client.
+  const hasErrorIndicator =
+    firstArg.includes('Failed') ||
+    firstArg.includes('failed') ||
+    firstArg.includes('Error') ||
+    firstArg.includes('error') ||
+    firstArg.includes('❌') ||
+    firstArg.includes('⚠️') ||
+    firstArg.includes('[WARN]') ||
+    firstArg.includes('[ERROR]');
+  const isModuleDebugMessage = /^\[[\w\- ]+\]/.test(firstArg) && !hasErrorIndicator;
+  if (!isModuleDebugMessage) {
     originalConsoleError(...args);
   }
 };
+
+// ─── Global safety net ────────────────────────────────────────────────────────
+// An unhandled promise rejection terminates the Node process by default
+// (Node ≥15, --unhandled-rejections=throw). In stdio mode that kills the MCP
+// subprocess and the client must restart it — observed as "the server crashes
+// on the first request and has to be restarted" when a background task (e.g.
+// the async DB load) rejects before any tool call awaits it. Log and keep the
+// server alive instead of dying. (stderr is already tee'd to LOG_FILE above.)
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.stderr.write(`[d365fo-mcp] ⚠️ Unhandled promise rejection (server staying up): ${msg}\n`);
+});
+
+// Same protection for SYNCHRONOUS uncaught exceptions — a throw that escapes a
+// timer/stream/event callback (not an awaited promise) would otherwise stop the
+// process outright. For a stdio server that means the MCP client must respawn
+// the subprocess after the very first failing request. Log the full stack so the
+// root cause is diagnosable, then keep serving. (Genuinely fatal startup errors
+// are still surfaced via main().catch → process.exit below.)
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[d365fo-mcp] ⚠️ Uncaught exception (server staying up): ${err?.stack ?? err}\n`);
+});
 
 const PORT = parseInt(process.env.PORT || '8080');
 // Derive server root from this file's location so paths are absolute
@@ -208,10 +232,16 @@ async function initializeServices() {
     console.log(`📚 Loading metadata from: ${DB_PATH}`);
     console.log(`📚 Labels database: ${LABELS_DB_PATH}`);
     serverState.statusMessage = 'Loading metadata database...';
-    
+
+    // Yield event loop so any pending MCP protocol messages (initialize exchange,
+    // roots/list, first tool call) can be queued before new Database() blocks.
+    // better-sqlite3 open is synchronous — a 1.5 GB file can stall the loop for
+    // several seconds, causing the first client request to time out and cancel.
+    await new Promise<void>(r => setImmediate(r));
+
     let symbolIndex: XppSymbolIndex;
     let symbolCount = 0;
-    
+
     try {
       symbolIndex = new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
       symbolCount = symbolIndex.getSymbolCount();
@@ -399,24 +429,19 @@ async function initializeBridge(targetContext: import('./types/context.js').XppS
 
 async function main() {
   // ─────────────────────────────────────────────────────────────────────────────
-  // Phase-1 diagnostic interceptors (stdio-only helpers)
-  // Defined here so _phase1Start and diagTs are never allocated in HTTP mode.
-  // Each incoming/outgoing newline-delimited JSON-RPC message is logged to
-  // stderr so you can see exactly what VS 2022 sends.
+  // Stdin sniffer: capture the `initialize` request params for get_workspace_info.
   // ─────────────────────────────────────────────────────────────────────────────
-  const _phase1Start = Date.now();
-  function diagTs(): string {
-    return `+${Date.now() - _phase1Start}ms`;
-  }
-
-  /** Wraps process.stdin — logs every incoming JSON-RPC message, passes data through unchanged. */
-  function createDiagnosticStdin(): Transform {
+  /**
+   * Wraps process.stdin to capture the `initialize` request params (clientInfo,
+   * capabilities, roots) so get_workspace_info can surface them. Passes every
+   * byte through unchanged — this feeds a real tool, it is not a diagnostic trace.
+   */
+  function createInitializeParamsSniffer(): Transform {
     let buf = Buffer.alloc(0);
     const t = new Transform({
       transform(chunk: Buffer, _enc, cb) {
         buf = Buffer.concat([buf, chunk]);
-        // MCP stdio transport uses newline-delimited JSON: each message is one
-        // JSON object terminated by \n (with optional \r before \n).
+        // MCP stdio transport uses newline-delimited JSON: one object per line.
         let newlineIdx: number;
         while ((newlineIdx = buf.indexOf(0x0a)) !== -1) {
           const line = buf.slice(0, newlineIdx).toString('utf8').replace(/\r$/, '');
@@ -424,17 +449,8 @@ async function main() {
           if (!line.trim()) continue;
           try {
             const msg = JSON.parse(line);
-            // Always capture initialize params regardless of DEBUG_LOGGING flag
-            // so get_workspace_info can show them even in production stdio mode.
             if (msg.method === 'initialize' && msg.params) {
               setInitializeParams(msg.params);
-            }
-            if (DEBUG_LOGGING) {
-              const kind = msg.method != null ? `📨 ${msg.method}` : `✅ reply#${msg.id}`;
-              const payload = msg.params ?? msg.result ?? msg.error ?? {};
-              process.stderr.write(
-                `[VS→MCP ${diagTs()}] ${kind}  ${JSON.stringify(payload).slice(0, 900)}\n`
-              );
             }
           } catch { /* non-JSON line, skip */ }
         }
@@ -445,43 +461,24 @@ async function main() {
     return t;
   }
 
-  /** Wraps process.stdout — logs every outgoing JSON-RPC message, passes data through unchanged. */
-  function createDiagnosticStdout(): Transform {
-    let buf = Buffer.alloc(0);
-    const t = new Transform({
-      transform(chunk: Buffer, _enc, cb) {
-        buf = Buffer.concat([buf, chunk]);
-        // MCP stdio transport uses newline-delimited JSON.
-        let newlineIdx: number;
-        while ((newlineIdx = buf.indexOf(0x0a)) !== -1) {
-          const line = buf.slice(0, newlineIdx).toString('utf8').replace(/\r$/, '');
-          buf = buf.slice(newlineIdx + 1);
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line);
-            const kind = msg.method != null ? `🔔 ${msg.method}` : `📤 reply#${msg.id}`;
-            let payload: unknown = msg.result ?? msg.params ?? msg.error ?? {};
-            // Avoid flooding log with the full tools/list payload
-            if (msg.id != null && Array.isArray((payload as any)?.tools)) {
-              payload = { tools_count: (payload as any).tools.length, first: (payload as any).tools[0]?.name };
-            }
-            process.stderr.write(
-              `[MCP→VS ${diagTs()}] ${kind}  ${JSON.stringify(payload).slice(0, 500)}\n`
-            );
-          } catch { /* non-JSON line, skip */ }
-        }
-        cb(null, chunk); // pass data through unchanged
-      },
-    });
-    t.pipe(process.stdout);
-    return t;
-  }
-
-  // CRITICAL: In STDIO mode, redirect all console.log to stderr
+  // CRITICAL: In STDIO mode, redirect all console.log/info/warn to stderr.
   // GitHub Copilot reads stdout for MCP protocol only!
+  // Suppress verbose operational messages unless DEBUG_LOGGING=true — every
+  // stderr line appears as "[warning] [server stderr]" in the MCP client UI,
+  // which is confusing when it's just normal startup/metrics output.
   if (isStdioMode) {
-    console.log = (...args: any[]) => process.stderr.write(args.join(' ') + '\n');
-    console.info = (...args: any[]) => process.stderr.write(args.join(' ') + '\n');
+    const stderrWrite = (...args: any[]) => {
+      if (DEBUG_LOGGING) { process.stderr.write(args.join(' ') + '\n'); return; }
+      const msg = args.join(' ');
+      // Only forward genuine errors/warnings; suppress operational info.
+      if (msg.includes('❌') || msg.includes('⚠️') ||
+          msg.includes('Error') || msg.includes('error') ||
+          msg.includes('Failed') || msg.includes('failed')) {
+        process.stderr.write(msg + '\n');
+      }
+    };
+    console.log = stderrWrite;
+    console.info = stderrWrite;
     console.warn = (...args: any[]) => process.stderr.write('[WARN] ' + args.join(' ') + '\n');
   } else {
     // HTTP mode (Azure App Service): redirect console.warn to stdout so Azure
@@ -506,16 +503,6 @@ async function main() {
     // Eagerly scan D365FO_SOLUTIONS_PATH so allDetectedProjects is populated before
     // VS 2022 sends roots/list (usually within 1–2 s of startup).
     getConfigManager().initEagerScan();
-    process.stderr.write(`[stdio ${diagTs()}] Seeding workspace: ${initialWorkspace}\n`);
-    if (DEBUG_LOGGING) {
-      process.stderr.write(
-        `[phase1 diag] ────────────────────────────────────────────────────────\n` +
-        `[phase1 diag] DEBUG_LOGGING=true → raw JSON-RPC trace ENABLED\n` +
-        `[phase1 diag]  [VS→MCP ...] = messages FROM Visual Studio TO this server\n` +
-        `[phase1 diag]  [MCP→VS ...] = messages FROM this server TO Visual Studio\n` +
-        `[phase1 diag] ────────────────────────────────────────────────────────\n`
-      );
-    }
     getConfigManager().setRuntimeContext({ workspacePath: initialWorkspace });
 
     // STDIO mode: connect transport BEFORE the heavy database open so the MCP
@@ -546,6 +533,12 @@ async function main() {
       resolveDbReady = res;
       rejectDbReady  = rej;
     });
+    // Floor handler: if the background DB load fails before any tool call awaits
+    // dbReady (e.g. the first request is a LOCAL tool, which skips the wait in
+    // toolHandler), the rejection would otherwise float and crash the stdio
+    // process. Attaching a catch here marks it handled; tool handlers that do
+    // await context.dbReady still receive and surface the rejection themselves.
+    dbReadyPromise.catch(() => { /* handled — never let it float */ });
 
     const stubContext: import('./types/context.js').XppServerContext = {
       symbolIndex: stubIndex,
@@ -557,23 +550,18 @@ async function main() {
     const mcpServer = createXppMcpServer(stubContext);
 
     // Step 2: connect transport — handshake completes here
-    // Always wrap stdin with the session-sniffer Transform so we can capture
-    // the `initialize` request params (clientInfo, capabilities) for
-    // get_workspace_info diagnostics — even when DEBUG_LOGGING is false.
-    // stdout is only intercepted when DEBUG_LOGGING=true (it's noisy).
-    const diagStdin  = createDiagnosticStdin();
-    const diagStdout = DEBUG_LOGGING ? createDiagnosticStdout() : process.stdout;
+    // Always wrap stdin with the initialize-params sniffer so we can capture the
+    // `initialize` request params (clientInfo, capabilities) for get_workspace_info.
     const transport = new StdioServerTransport(
-      diagStdin  as unknown as typeof process.stdin,
-      diagStdout as unknown as typeof process.stdout,
+      createInitializeParamsSniffer() as unknown as typeof process.stdin,
+      process.stdout,
     );
     await mcpServer.connect(transport);
-    console.log(`✅ Stdio transport connected ${diagTs()} (DB loading in background)`);
+    console.log('✅ Stdio transport connected (DB loading in background)');
 
     // Step 3: yield the event loop so `initialized` + roots/list can be processed
     // BEFORE the synchronous new Database() call blocks the event loop.
     await new Promise<void>(resolve => setImmediate(resolve));
-    process.stderr.write(`[stdio ${diagTs()}] setImmediate fired — roots/list exchange should be done\n`);
 
     // Step 3b: Initialize C# bridge in parallel with DB load (non-blocking)
     // The bridge provides live metadata from Microsoft's IMetadataProvider API
@@ -593,7 +581,7 @@ async function main() {
       serverState.statusMessage = 'Ready';
       // Resolve dbReady AFTER context is patched — tools can now run with real index.
       resolveDbReady();
-      console.log(`✅ Database loaded in ${Date.now() - dbLoadStart} ms (${diagTs()} from process start) — all tools fully operational`);
+      console.log(`✅ Database loaded in ${Date.now() - dbLoadStart} ms — all tools fully operational`);
 
       // The in-memory stub symbol index is also unreachable once swapped.
       try { stubIndex.close(); } catch { /* ignore */ }

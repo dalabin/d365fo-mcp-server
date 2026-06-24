@@ -42,6 +42,20 @@ export async function getMethodTool(request: CallToolRequest, context: XppServer
 
   const { include, ...rest } = parsed.data;
 
+  if (!rest.className) {
+    return {
+      content: [{
+        type: 'text',
+        text:
+          `❌ get_method: missing required parameter "className".\n\n` +
+          `Usage: get_method(className="MyClass", methodName="myMethod")\n\n` +
+          `If you only know the method name, use search(query="myMethod", type="method") first ` +
+          `to find which class it belongs to.`,
+      }],
+      isError: true,
+    };
+  }
+
   if (include === 'signature') {
     return getMethodSignatureTool(subRequest('get_method_signature', rest), context);
   }
@@ -52,9 +66,25 @@ export async function getMethodTool(request: CallToolRequest, context: XppServer
   // both: signature first (cheap context), then full source.
   const sig = await getMethodSignatureTool(subRequest('get_method_signature', rest), context);
   const src = await getMethodSourceTool(subRequest('get_method_source', rest), context);
+  const sigOk = Boolean(sig && !sig.isError);
+  const srcOk = Boolean(src && !src.isError);
+
+  // Source is the authoritative payload. Some members (e.g. classDeclaration)
+  // have a valid source but no parseable signature, so the signature path emits
+  // a misleading "method not found" error. When the source succeeded, only keep
+  // the parts that actually succeeded — never surface a signature-only failure.
+  const parts = [
+    ...(sigOk ? sig!.content : []),
+    ...(srcOk ? src!.content : []),
+  ];
+  if (parts.length > 0) {
+    return { content: parts, isError: false };
+  }
+
+  // Both failed — return the source error (its "not found" hint is more useful).
   return {
-    content: [...(sig?.content ?? []), ...(src?.content ?? [])],
-    isError: Boolean(sig?.isError || src?.isError),
+    content: [...(src?.content ?? sig?.content ?? [])],
+    isError: true,
   };
 }
 

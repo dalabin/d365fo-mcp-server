@@ -2,8 +2,8 @@
  * Singleton that stores information captured from the stdio MCP handshake.
  *
  * Written by:
- *  - index.ts createDiagnosticStdin() — parses the raw `initialize` JSON-RPC
- *    request (first message on stdin) and stores clientInfo + capabilities.
+ *  - index.ts createInitializeParamsSniffer() — parses the raw `initialize`
+ *    JSON-RPC request (first message on stdin) and stores clientInfo + capabilities.
  *  - mcpServer.ts applyRootsToConfig() — stores last roots/list result.
  *  - mcpServer.ts RootsListChangedNotificationSchema handler — increments
  *    rootsListChangedCount each time VS 2022 reports a workspace change.

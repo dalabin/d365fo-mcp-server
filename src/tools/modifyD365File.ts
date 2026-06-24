@@ -12,7 +12,7 @@ import * as fs from 'fs/promises';
 import path from 'path';
 import { parseStringPromise } from 'xml2js';
 import { getConfigManager, fallbackPackagePath, extractModelFromFilePath } from '../utils/configManager.js';
-import { isStandardModel } from '../utils/modelClassifier.js';
+import { isStandardModel, resolveObjectPrefix, applyObjectPrefix } from '../utils/modelClassifier.js';
 import { PackageResolver } from '../utils/packageResolver.js';
 import { resolveDbPathLocally } from '../utils/metadataResolver.js';
 import { assertWritePathAllowed } from '../utils/pathContainment.js';
@@ -25,6 +25,7 @@ import {
   bridgeAddEnumValue, bridgeModifyEnumValue, bridgeRemoveEnumValue,
   bridgeAddControl, bridgeAddDataSource,
   bridgeAddFieldModification, bridgeAddMenuItemToMenu,
+  bridgeRefreshProvider,
 } from '../bridge/index.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
@@ -115,6 +116,132 @@ export function assertCleanXppSource(source: string | undefined, paramName: stri
   }
 }
 
+/** Strip X++ line/block/doc comments and string literals so their braces/parens
+ *  don't skew structural scans. Returns a same-ish-length cleaned string. */
+function stripXppCommentsAndStrings(s: string): string {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const two = s.slice(i, i + 2);
+    if (two === '//') {                       // line comment (incl. /// doc comments)
+      const nl = s.indexOf('\n', i);
+      i = nl === -1 ? s.length : nl;
+      continue;
+    }
+    if (two === '/*') {                        // block comment
+      const end = s.indexOf('*/', i + 2);
+      i = end === -1 ? s.length : end + 2;
+      continue;
+    }
+    if (s[i] === '"') {                         // string literal
+      i++;
+      while (i < s.length && s[i] !== '"') { if (s[i] === '\\') i++; i++; }
+      i++;
+      out += '""';
+      continue;
+    }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+/** Count top-level X++ method bodies: a `{` opened at brace-depth 0 immediately
+ *  after a `)` (a method signature). Nested blocks (if/for/switch) are inside the
+ *  body (depth > 0) and a class wrapper opens after an identifier, so neither is
+ *  miscounted. */
+export function countTopLevelMethodBodies(source: string): number {
+  const cleaned = stripXppCommentsAndStrings(source);
+  let depth = 0;
+  let count = 0;
+  let prevSignificant = '';
+  for (const ch of cleaned) {
+    if (ch === '{') {
+      if (depth === 0 && prevSignificant === ')') count++;
+      depth++;
+    } else if (ch === '}') {
+      if (depth > 0) depth--;
+    }
+    if (!/\s/.test(ch)) prevSignificant = ch;
+  }
+  return count;
+}
+
+/** Split a source string containing one or more top-level X++ methods into the
+ *  individual method sources (each including any leading doc comments / attributes
+ *  and its full body). Mirrors countTopLevelMethodBodies' brace/comment/string
+ *  handling. Used to let add-method accept several methods in one call and add them
+ *  one <Method> at a time. */
+export function splitTopLevelMethodBodies(source: string): string[] {
+  const s = source;
+  const methods: string[] = [];
+  let depth = 0;
+  let methodStart = -1;
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    // Start a method slice at the first significant char (incl. leading /// doc
+    // comments and [Attribute] blocks) after the previous method closed.
+    if (methodStart === -1 && !/\s/.test(ch)) methodStart = i;
+
+    const two = s.slice(i, i + 2);
+    if (two === '//') { const nl = s.indexOf('\n', i); i = nl === -1 ? s.length : nl; continue; }
+    if (two === '/*') { const end = s.indexOf('*/', i + 2); i = end === -1 ? s.length : end + 2; continue; }
+    if (ch === '"') { i++; while (i < s.length && s[i] !== '"') { if (s[i] === '\\') i++; i++; } i++; continue; }
+
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      if (depth > 0) depth--;
+      if (depth === 0 && methodStart !== -1) {
+        methods.push(s.slice(methodStart, i + 1).trim());
+        methodStart = -1;
+      }
+    }
+    i++;
+  }
+  // Trailing brace-less content (e.g. an interface/abstract method declaration).
+  if (methodStart !== -1) {
+    const tail = s.slice(methodStart).trim();
+    if (tail) methods.push(tail);
+  }
+  return methods.filter(Boolean);
+}
+
+/**
+ * Reject an add-method payload that contains more than one method. Each add-method
+ * call emits a single <Method>; passing two methods drops the second outside the
+ * class scope and yields invalid X++ ("Unexpected token 'public' specified outside
+ * the scope of any class or model element"). Splitting into separate calls is the fix.
+ */
+export function assertSingleMethodSource(source: string | undefined): void {
+  if (!source) return;
+  const count = countTopLevelMethodBodies(source);
+  if (count > 1) {
+    throw new Error(
+      `⛔ add-method expects exactly ONE method, but ${count} method bodies were detected in the source.\n\n` +
+      `Each add-method call adds a single <Method> element. Passing multiple methods puts all but ` +
+      `the first OUTSIDE the class scope, producing invalid X++ ("Unexpected token 'public' specified ` +
+      `outside the scope of any class or model element").\n\n` +
+      `Add each method with its own add-method call — one method per call.`
+    );
+  }
+}
+
+/**
+ * Derive the method name from a full X++ method source: the identifier immediately
+ * before the first '(' of the signature, after stripping comments, strings and
+ * attribute blocks (e.g. [ExtensionOf(...)]). Lets add-method callers omit methodName
+ * when they already pass the complete source (e.g. "public static X find(...)").
+ * Returns null when no signature can be found.
+ */
+export function extractMethodNameFromSource(source: string | undefined): string | null {
+  if (!source) return null;
+  const cleaned = stripXppCommentsAndStrings(source).replace(/\[[^\]]*\]/g, ' ');
+  const m = cleaned.match(/\b([A-Za-z_]\w*)\s*\(/);
+  return m ? m[1] : null;
+}
+
 /**
  * Direct XML file-level replace-code fallback.
  * Used when the C# bridge fails or returns null for replace-code on forms/form-extensions
@@ -170,6 +297,108 @@ async function directXmlReplaceCode(
   }
 }
 
+/**
+ * Direct XML fallback for add-menu-item-to-menu.
+ * The C# bridge can only modify menus it has loaded from its startup roots;
+ * newly created menus trigger a NullRef because they aren't in the bridge's
+ * in-memory model yet (even after update_symbol_index). This function edits
+ * the XML file directly as a last-resort fallback.
+ */
+async function directXmlAddMenuItemToMenu(
+  filePath: string,
+  menuItemToAdd: string,
+  menuItemToAddType: string,
+): Promise<{ success: boolean; message: string } | null> {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    const typeMap: Record<string, string> = { display: 'Display', action: 'Action', output: 'Output' };
+    const menuItemType = typeMap[menuItemToAddType?.toLowerCase()] ?? 'Display';
+
+    const newElement =
+      `\t\t<AxMenuFunctionItem>\n` +
+      `\t\t\t<Name>${menuItemToAdd}</Name>\n` +
+      `\t\t\t<MenuItemName>${menuItemToAdd}</MenuItemName>\n` +
+      `\t\t\t<MenuItemType>${menuItemType}</MenuItemType>\n` +
+      `\t\t</AxMenuFunctionItem>`;
+
+    let updated: string;
+    if (content.includes('<Elements />')) {
+      updated = content.replace('<Elements />', `<Elements>\n${newElement}\n\t</Elements>`);
+    } else if (content.includes('</Elements>')) {
+      updated = content.replace('</Elements>', `${newElement}\n\t</Elements>`);
+    } else {
+      return null;
+    }
+
+    if (updated === content) return null;
+
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
+    console.error(`[modify_d365fo_file] ✅ directXmlAddMenuItemToMenu: added '${menuItemToAdd}' to ${filePath}`);
+    return {
+      success: true,
+      message: `✅ Menu item '${menuItemToAdd}' (${menuItemType}) added via direct XML fallback. File: ${filePath}`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlAddMenuItemToMenu failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Heuristic: does a bridge failure message indicate the C# provider could not
+ * resolve the target object (vs. a genuine operation error like "index already
+ * exists")? An unresolved object is the one failure worth a refresh+retry,
+ * because an object created this session may not be in the provider's
+ * startup-fixed metadata roots yet.
+ */
+export function isUnresolvedObjectError(message: string | undefined): boolean {
+  if (!message) return false;
+  // Content/operation failures that merely contain "not found" are NOT object
+  // resolution and must not trigger the refresh+retry or the "could not resolve"
+  // guidance: replace-code's "oldCode not found in <obj>.<method>", a missing
+  // method/field/index, etc. The object was resolved — only the snippet/member wasn't.
+  if (/\b(oldcode|new ?code|code|snippet|method|field|index|relation|element)\b[^.]*\bnot found/i.test(message)) {
+    return false;
+  }
+  // Genuine object-resolution failures: a quoted object name "'X' not found",
+  // or the explicit resolve/model phrases the bridge emits.
+  return /'[^']+'\s+not found|could not resolve|does not exist|not in (the )?(metadata )?model|cannot determine model/i.test(message);
+}
+
+/**
+ * Build the actionable "object could not be resolved" error for a modify
+ * operation. When `bridgeReported` is supplied it is included verbatim so the
+ * caller sees exactly what the C# bridge said rather than a generic guess.
+ */
+function unresolvedObjectError(
+  operation: string,
+  objectType: string,
+  objectName: string,
+  actualFilePath?: string,
+  bridgeReported?: string,
+): string {
+  return (
+    `Bridge operation '${operation}' could not resolve ${objectType} '${objectName}'.\n` +
+    (bridgeReported ? `Bridge reported: ${bridgeReported}\n` : '') +
+    `Most likely cause: the C# metadata bridge could not find '${objectName}' in its metadata model.\n` +
+    `This is typical right after creating an object in the same session — the bridge's metadata ` +
+    `roots are fixed at startup, so a file written this session may not be in its model.\n` +
+    `Auto-refresh was already attempted once and still failed.\n\n` +
+    `Reliable fallback (works for tables, forms, classes created this session):\n` +
+    `  Read ${objectName}.xml with get_object_info, add the ${operation.replace('add-', '')} ` +
+    `element directly to the XML, then re-write the whole file:\n` +
+    `  d365fo_file(action="create", overwrite=true, xmlContent="<complete updated XML>")\n\n` +
+    `Alternative — try in order:\n` +
+    `  1. update_symbol_index({ filePath: "<path to ${objectName}.xml>" })\n` +
+    `  2. Check D365FO_CUSTOM_PACKAGES_PATH points to the correct metadata folder.\n` +
+    `  3. Confirm ${objectName}.xml actually exists on disk.\n` +
+    (actualFilePath ? `Resolved file path: ${actualFilePath}\n` : '') +
+    `If none of these apply, the object may simply not exist or its name may be misspelled.`
+  );
+}
+
 const ModifyD365FileArgsSchema = z.object({
   objectType: z.enum([
     'class', 'table', 'form', 'enum', 'query', 'view', 'edt', 'data-entity', 'report',
@@ -180,7 +409,11 @@ const ModifyD365FileArgsSchema = z.object({
     'menu', 'menu-extension',
     'security-privilege', 'security-duty', 'security-role',
   ]).describe('Type of D365FO object'),
-  objectName: z.string().describe('Name of the object to modify'),
+  objectName: z.string().optional().describe(
+    'Name of the object to modify. Optional when filePath is provided — it is then ' +
+    'derived from the file basename (the bridge resolves objects by name, which the ' +
+    'file path already determines).'
+  ),
   operation: z.enum([
     'add-method', 'remove-method', 'replace-code',
     'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
@@ -450,6 +683,32 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
   try {
     const args = ModifyD365FileArgsSchema.parse(request.params.arguments);
 
+    // Decode XML entities in X++ payloads. An AI that copied entity-encoded code (an
+    // SSRS <Text> block, or escaped doc comments like "/// &lt;summary&gt;") sends
+    // &lt;/&gt;/&amp;/&quot;/&apos;; the serializer would otherwise write them literally
+    // into the source. No-op for clean X++ — literal <, >, && and " are not entities.
+    if (args.sourceCode) args.sourceCode = decodeXmlEntitiesFromXppSource(args.sourceCode);
+    if ((args as any).methodCode) (args as any).methodCode = decodeXmlEntitiesFromXppSource((args as any).methodCode);
+    if (args.newCode) args.newCode = decodeXmlEntitiesFromXppSource(args.newCode);
+    if (args.oldCode) args.oldCode = decodeXmlEntitiesFromXppSource(args.oldCode);
+
+    // objectName is optional when filePath is given — derive it from the file
+    // basename using path.win32.basename (handles Windows backslash paths on
+    // all platforms — path.posix.basename treats '\\' as a regular character).
+    if (!args.objectName) {
+      if (args.filePath) {
+        (args as any).objectName = path.win32.basename(args.filePath, '.xml');
+      } else {
+        return {
+          content: [{
+            type: 'text',
+            text: "❌ Provide 'objectName' — or 'filePath', from which the object name is derived.",
+          }],
+          isError: true,
+        };
+      }
+    }
+
     // Grounding enforcement: modifying an extension changes the behaviour of an
     // existing base object — when GROUNDING_ENFORCE=true the model must prove
     // (via prepare_change) that it inspected the real object first.
@@ -481,16 +740,41 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     assertCleanXppSource((args as any).methodCode, 'methodCode');
     assertCleanXppSource(args.newCode, 'newCode');
 
+    // add-method emits exactly one <Method>; reject a payload carrying multiple
+    // methods (the extras would land outside the class → invalid X++). Only for the
+    // method-adding operations — replace-code's newCode is a snippet, not a method.
+    if (['add-method', 'add-display-method', 'add-table-method'].includes(args.operation)) {
+      const methodSrc = args.sourceCode ?? (args as any).methodCode;
+      // add-method may carry several methods — they are split and added one <Method>
+      // at a time below. add-display-method / add-table-method generate a single
+      // method, so multiple bodies there are still a mistake.
+      if (args.operation !== 'add-method') {
+        assertSingleMethodSource(methodSrc);
+      }
+      // Derive methodName from the source signature when omitted — the full method
+      // source already contains the name (e.g. "public static X find(...)" → "find").
+      // Skip derivation when the payload holds multiple methods (handled per-method).
+      if (!args.methodName && countTopLevelMethodBodies(methodSrc ?? '') <= 1) {
+        const derived = extractMethodNameFromSource(methodSrc);
+        if (derived) {
+          args.methodName = derived;
+          console.error(`[modify_d365fo_file] methodName omitted — derived '${derived}' from the source signature`);
+        }
+      }
+    }
+
     const { symbolIndex } = context;
-    const {
+    let {
       objectType,
-      objectName,
       operation,
       createBackup,
       modelName,
       workspacePath,
       filePath: explicitFilePath,
     } = args;
+    // objectName guaranteed non-null by the derivation block above.
+    // Declared as `let` so it can be corrected from the resolved file basename below.
+    let objectName = args.objectName!;
 
     // ── Auto-resolve parentControl for add-control on form-extension ─────────
     // When `parentControl` is a fuzzy / lowercase string (e.g. "general"), look
@@ -669,6 +953,22 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       await createFileBackup(actualFilePath);
     }
 
+    // 3b. Derive the authoritative object name from the resolved file path.
+    //     The caller may pass objectName="RentEquipment" while the file on disk
+    //     is AslRentEquipment.xml (auto-prefixed at create time). The C# bridge
+    //     resolves objects by name from its metadata model — if the name doesn't
+    //     match the file it will always return null, regardless of refreshes.
+    //     Use path.win32.basename so Windows backslash paths are handled correctly
+    //     on all platforms (path.posix.basename treats '\\' as a regular character).
+    const fileBaseName = path.win32.basename(actualFilePath, '.xml');
+    const bridgeObjectName = fileBaseName !== objectName ? fileBaseName : objectName;
+    if (bridgeObjectName !== objectName) {
+      console.error(
+        `[modify_d365fo_file] ℹ️  objectName "${objectName}" → resolved to "${bridgeObjectName}" from file basename`,
+      );
+      objectName = bridgeObjectName;
+    }
+
     // ── Bridge-only modify via IMetadataProvider.Update() ────────────────────
     // ALL modify operations go through the C# bridge. The bridge reads, modifies,
     // and writes via the official D365FO metadata API — no xml2js needed.
@@ -684,19 +984,66 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     }
 
     let bridgeResult: { success: boolean; message: string } | null = null;
+    let _bridgeRetried = false;
+    // Retry loop: on the first null result with all required params present,
+    // refresh the bridge provider (picks up objects created this session) and
+    // re-run the operation once. Max 1 auto-refresh retry (_bridgeRetried guard).
+    _bridgeRetry: do {
+      bridgeResult = null;
 
     switch (operation) {
       case 'add-method': {
         // sourceCode and methodCode are aliases; sourceCode wins when both are set.
         const methodSource = args.sourceCode ?? (args as any).methodCode;
-        if (args.methodName && methodSource) {
-          bridgeResult = await bridgeAddMethod(
-            context.bridge,
-            objectType,
-            objectName,
-            args.methodName,
-            methodSource,
-          );
+        if (methodSource) {
+          // A single call may carry several methods — split and add each as its own
+          // <Method> so callers don't have to issue one tool call per method.
+          const bodies = countTopLevelMethodBodies(methodSource) > 1
+            ? splitTopLevelMethodBodies(methodSource)
+            : [methodSource];
+
+          if (bodies.length > 1) {
+            const added: string[] = [];
+            let lastResult: { success: boolean; message: string } | null = null;
+            for (const body of bodies) {
+              const mName = extractMethodNameFromSource(body);
+              if (!mName) {
+                // A body without a derivable method name is typically a class/extension declaration
+                // (e.g. "[ExtensionOf(tableStr(T))] final class T_Extension { }"). Such blocks are
+                // NOT methods and do not belong in add-method — skip and continue.
+                // The regex handles: optional attribute block(s) → optional modifiers (final/abstract/
+                // public/static/…) → class or interface keyword.
+                const trimmed = body.trim();
+                if (/^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|private|protected|final|abstract|static|internal|sealed)\s+)*(?:class|interface)\b/i.test(trimmed)) {
+                  console.warn(`[add-method] Skipping class/interface declaration block (not a method): ${trimmed.slice(0, 80)}...`);
+                  continue;
+                }
+                throw new Error(
+                  `⛔ add-method: could not derive a method name from one of the ${bodies.length} method bodies. ` +
+                  `Ensure each method has a complete signature (e.g. "public void foo()").`,
+                );
+              }
+              lastResult = await bridgeAddMethod(context.bridge, objectType, objectName, mName, body);
+              if (!lastResult) {
+                throw new Error(
+                  `Bridge add-method failed for '${mName}' (${added.length} of ${bodies.length} method(s) added successfully: ${added.join(', ') || 'none'}).`,
+                );
+              }
+              added.push(mName);
+            }
+            // Summarize as a single result for the downstream success message.
+            bridgeResult = lastResult
+              ? { ...lastResult, message: `Added ${added.length} methods: ${added.join(', ')}` }
+              : null;
+          } else if (args.methodName) {
+            bridgeResult = await bridgeAddMethod(
+              context.bridge,
+              objectType,
+              objectName,
+              args.methodName,
+              methodSource,
+            );
+          }
         }
         break;
       }
@@ -741,6 +1088,12 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             `\n\n> 🔧 Table method \`${gen.methodName}\` generated from ` +
             `tableMethodType="${(args as any).tableMethodType}".` +
             (gen.note ? `\n> ${gen.note}` : '');
+        }
+        // When caller supplies custom source (methodCode/sourceCode) + tableMethodType
+        // but omits methodName, the method name equals the tableMethodType value
+        // (find / exist / findByRecId / validateWrite / validateDelete / initValue).
+        if (!methodName && (args as any).tableMethodType && methodSource) {
+          methodName = (args as any).tableMethodType as string;
         }
         if (methodName && methodSource) {
           bridgeResult = await bridgeAddMethod(
@@ -845,11 +1198,19 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'add-index': {
         if ((args as any).indexName) {
+          // indexFields is documented (Zod + MCP schema) as [{ fieldName, direction? }],
+          // but the bridge's addIndex expects a flat string[] of field names. Map the
+          // objects to their fieldName here — passing the objects straight through makes
+          // the C# side deserialize [{fieldName:…}] into List<string>, which throws and
+          // surfaces as a null bridge result (misreported as "could not resolve table").
+          const indexFieldNames: string[] | undefined = Array.isArray((args as any).indexFields)
+            ? (args as any).indexFields.map((f: any) => (typeof f === 'string' ? f : f?.fieldName)).filter(Boolean)
+            : undefined;
           bridgeResult = await bridgeAddIndex(
             context.bridge,
             objectName,
             (args as any).indexName,
-            (args as any).indexFields,
+            indexFieldNames,
             (args as any).indexAllowDuplicates,
             (args as any).indexAlternateKey,
           );
@@ -868,12 +1229,24 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'add-relation': {
         if ((args as any).relationName && (args as any).relatedTable) {
+          // relationConstraints is documented as [{ fieldName, relatedFieldName }], but the
+          // bridge/C# WriteRelationConstraint deserializes the JSON keys { field, relatedField }.
+          // Without this remap the keys don't match: C# sees no `field`/`relatedField`, leaves
+          // both null, and silently writes a relation with EMPTY constraints (no hard error —
+          // the corruption only surfaces at compile time). Map the field names explicitly.
+          const constraints: Array<{ field?: string; relatedField?: string }> | undefined =
+            Array.isArray((args as any).relationConstraints)
+              ? (args as any).relationConstraints.map((c: any) => ({
+                  field: c?.field ?? c?.fieldName,
+                  relatedField: c?.relatedField ?? c?.relatedFieldName,
+                }))
+              : undefined;
           bridgeResult = await bridgeAddRelation(
             context.bridge,
             objectName,
             (args as any).relationName,
             (args as any).relatedTable,
-            (args as any).relationConstraints,
+            constraints,
           );
         }
         break;
@@ -1095,6 +1468,18 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             (args as any).menuItemToAdd,
             (args as any).menuItemToAddType,
           );
+          // Fallback: bridge requires the menu to exist in its loaded metadata roots.
+          // Newly created menus aren't there yet — write directly to the XML file.
+          if (!bridgeResult || !bridgeResult.success) {
+            const xmlFallbackResult = await directXmlAddMenuItemToMenu(
+              actualFilePath,
+              (args as any).menuItemToAdd,
+              (args as any).menuItemToAddType ?? 'display',
+            );
+            if (xmlFallbackResult) {
+              bridgeResult = xmlFallbackResult;
+            }
+          }
         }
         break;
       }
@@ -1139,6 +1524,20 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         (args as any)[p] !== undefined || (aliases[p] ?? []).some(a => (args as any)[a] !== undefined);
       const missing = required.filter(p => !isProvided(p));
 
+      // Auto-refresh retry: all required params are present but bridge returned
+      // null — the object was likely written this session and isn't in the
+      // bridge's metadata model yet (roots are fixed at startup). Refresh once
+      // and re-run the operation. Afterwards the normal error path takes over.
+      if (missing.length === 0 && !_bridgeRetried && context.bridge) {
+        console.error(
+          `[modify_d365fo_file] ⚠️ '${operation}' on '${objectName}' returned null — ` +
+          `refreshing bridge provider and retrying once`,
+        );
+        try { await bridgeRefreshProvider(context.bridge); } catch { /* best-effort */ }
+        _bridgeRetried = true;
+        continue _bridgeRetry;
+      }
+
       // Two distinct causes produce a null bridge result; pick the message that
       // matches reality instead of always blaming missing parameters.
       if (missing.length > 0) {
@@ -1151,29 +1550,51 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         );
       }
 
-      // All required params were supplied, yet the bridge returned null. The
-      // cause is object resolution: the C# bridge could not find '${objectName}'
-      // in its metadata model. This is common right after creating the object —
-      // the bridge resolves objects through fixed roots configured at startup
-      // and does not see files written since, so a just-created object is not
-      // yet in its model.
-      throw new Error(
-        `Bridge operation '${operation}' returned null even though all required parameters ` +
-        `(${required.join(', ') || 'none'}) were provided.\n` +
-        `Most likely cause: the C# metadata bridge could not resolve ${objectType} '${objectName}'.\n` +
-        `This is typical right after creating an object — the bridge's metadata roots are fixed at ` +
-        `startup, so an object written this session may not be in its model yet.\n` +
-        `Try, in order:\n` +
-        `  1. Refresh the bridge's view of the new object: update_symbol_index({ filePath: "<path to ${objectName}.xml>" }).\n` +
-        `  2. Ensure the model is under the bridge's roots — set context.customPackagesPath / ` +
-        `D365FO_CUSTOM_PACKAGES_PATH to the metadata folder, or pass an explicit filePath to this call.\n` +
-        `  3. Confirm ${objectName}.xml actually exists on disk under those roots.\n` +
-        (actualFilePath ? `Resolved file path: ${actualFilePath}\n` : '') +
-        `If none of these apply, the object may simply not exist or its name may be misspelled.`
-      );
+      // All required params were supplied, yet the bridge returned null (it never
+      // attempted the op — e.g. provider not ready). Surface the actionable
+      // same-session resolution guidance.
+      throw new Error(unresolvedObjectError(operation, objectType, objectName, actualFilePath));
     }
-    if (!bridgeResult.success) {
-      throw new Error(`Bridge operation '${operation}' failed: ${bridgeResult.message}`);
+
+    // Bridge executed but reported failure. A resolution failure (object created
+    // this session, not yet in the provider's fixed-root model) gets the same
+    // one-shot refresh+retry the null path gets; any other failure falls through
+    // to the real-message throw below — no longer masked as a generic guess.
+    if (
+      !bridgeResult.success &&
+      !_bridgeRetried &&
+      context.bridge &&
+      isUnresolvedObjectError(bridgeResult.message)
+    ) {
+      console.error(
+        `[modify_d365fo_file] ⚠️ '${operation}' on '${objectName}' failed (${bridgeResult.message}) — ` +
+        `refreshing bridge provider and retrying once`,
+      );
+      try { await bridgeRefreshProvider(context.bridge); } catch { /* best-effort */ }
+      _bridgeRetried = true;
+      continue _bridgeRetry;
+    }
+    break _bridgeRetry;
+    } while (true); // end of retry loop
+
+    if (!bridgeResult!.success) {
+      // Surface the real bridge error. For an object-resolution failure keep the
+      // actionable same-session fallback guidance, now including exactly what the
+      // bridge reported instead of a generic "could not resolve" guess.
+      if (isUnresolvedObjectError(bridgeResult!.message)) {
+        throw new Error(
+          unresolvedObjectError(operation, objectType, objectName, actualFilePath, bridgeResult!.message),
+        );
+      }
+      let opErrorMsg = `Bridge operation '${operation}' failed: ${bridgeResult!.message}`;
+      if (operation === 'replace-code' && /oldCode not found/i.test(bridgeResult!.message ?? '')) {
+        opErrorMsg +=
+          `\n\n💡 Tip: The oldCode must match the exact source currently on disk.\n` +
+          `  • Fetch the current source first: get_object_info(objectType="${objectType}", name="${objectName}")\n` +
+          `  • Then copy the exact snippet from the output as oldCode.\n` +
+          `  • Alternative: use add-method with the complete new method body — it overwrites the existing method.`;
+      }
+      throw new Error(opErrorMsg);
     }
 
     console.error(`[modify_d365fo_file] ✅ Bridge ${operation}: ${bridgeResult.message}`);
@@ -1279,6 +1700,36 @@ async function findD365File(
     return explicitFilePath;
   }
 
+  // Resolve by the given name first; if that misses, retry once with the model
+  // prefix applied. create_d365fo_file auto-prefixes new object names (e.g.
+  // "RentEquipmentTable" → "AslRentEquipmentTable"), so a modify call with the bare
+  // name would otherwise fail to locate the file. The bridge object name is then
+  // re-derived from the resolved file's basename, so the prefixed name flows through.
+  const direct = await resolveD365FileByName(symbolIndex, objectType, objectName, modelName, packagePath);
+  if (direct) return direct;
+
+  const prefix = resolveObjectPrefix(modelName || getConfigManager().getModelName() || '');
+  if (prefix && !objectType.endsWith('-extension')) {
+    const prefixed = applyObjectPrefix(objectName, prefix);
+    if (prefixed && prefixed.toLowerCase() !== objectName.toLowerCase()) {
+      const viaPrefixed = await resolveD365FileByName(symbolIndex, objectType, prefixed, modelName, packagePath);
+      if (viaPrefixed) {
+        console.error(`[modifyD365File] '${objectName}' not found — resolved via prefixed name '${prefixed}'`);
+        return viaPrefixed;
+      }
+    }
+  }
+  return null;
+}
+
+/** Resolve a D365FO file by an exact object name (symbol DB, then filesystem). */
+async function resolveD365FileByName(
+  symbolIndex: any,
+  objectType: string,
+  objectName: string,
+  modelName?: string,
+  packagePath?: string,
+): Promise<string | null> {
   // Symbol DB only indexes a subset of types — for the rest go straight to filesystem.
   const dbTypeMap: Record<string, string> = {
     class: 'class',
@@ -1750,13 +2201,31 @@ function bufferVarName(tableName: string): string {
  * find/exist signatures use the correct parameter type. The field's `signature`
  * column stores its EDT name. Returns null when the field is not indexed.
  */
+/** Metadata base-type keywords (the stripped i:type, e.g. AxTableFieldString → "String").
+ *  These are NOT valid X++ parameter types — a field's signature in the index stores
+ *  the base type, not its EDT, so a resolved value matching one of these must be
+ *  discarded in favour of the field name (D365 fields are conventionally named after
+ *  their EDT, e.g. field ItemId uses EDT ItemId). */
+const METADATA_BASE_TYPE_KEYWORDS = new Set([
+  'string', 'integer', 'int', 'int64', 'real', 'date', 'time', 'datetime',
+  'utcdatetime', 'guid', 'container', 'enum', 'boolean', 'memo',
+]);
+
+function isMetadataBaseTypeKeyword(t: string): boolean {
+  return METADATA_BASE_TYPE_KEYWORDS.has(t.trim().toLowerCase());
+}
+
 function resolveFieldEdt(tableName: string, fieldName: string, db: any): string | null {
   try {
     const row = db.prepare(
       `SELECT signature FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE AND name = ? COLLATE NOCASE LIMIT 1`
     ).get(tableName, fieldName) as { signature: string | null } | undefined;
     const sig = row?.signature?.trim();
-    return sig ? sig : null;
+    // The index stores the field's BASE TYPE (e.g. "String"), not its EDT. A base-type
+    // keyword is not a usable X++ parameter type, so treat it as unresolved — the caller
+    // then falls back to the field name, which is conventionally the EDT.
+    if (!sig || isMetadataBaseTypeKeyword(sig)) return null;
+    return sig;
   } catch {
     return null;
   }

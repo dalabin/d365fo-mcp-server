@@ -11,7 +11,7 @@ export const fieldsFieldGroups: SubPatternSpec = {
   id: 'FieldsFieldGroups',
   xmlName: 'FieldsFieldGroups',
   displayName: 'Fields and Field Groups',
-  versions: ['1.1', '1.0'],
+  versions: ['1.2', '1.1', '1.0'],
   appliesToControlTypes: ['Group', 'TabPage'],
   purpose:
     'Responsive column layout for containers that contain only fields and one level of field groups. ' +

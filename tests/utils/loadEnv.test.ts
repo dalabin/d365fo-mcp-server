@@ -76,7 +76,7 @@ describe('env file path resolution', () => {
     loadEnv(FAKE_CALLER_URL);
 
     expect(mockConfig).toHaveBeenCalledTimes(1);
-    expect(mockConfig).toHaveBeenCalledWith({ path: REPO_ROOT_ENV });
+    expect(mockConfig).toHaveBeenCalledWith({ path: REPO_ROOT_ENV, quiet: true });
   });
 
   it('uses ENV_FILE when set to an absolute path', () => {
@@ -86,6 +86,7 @@ describe('env file path resolution', () => {
     expect(mockConfig).toHaveBeenCalledTimes(1);
     expect(mockConfig).toHaveBeenCalledWith({
       path: path.resolve('/some/instances/alpha/.env'),
+      quiet: true,
     });
   });
 
@@ -95,6 +96,7 @@ describe('env file path resolution', () => {
 
     expect(mockConfig).toHaveBeenCalledWith({
       path: path.resolve('instances/alpha/.env'),
+      quiet: true,
     });
   });
 });
@@ -108,8 +110,8 @@ describe('fallback behaviour', () => {
 
     // First call: explicit path; second call: no args (process.cwd() fallback)
     expect(mockConfig).toHaveBeenCalledTimes(2);
-    expect(mockConfig).toHaveBeenNthCalledWith(1, { path: REPO_ROOT_ENV });
-    expect(mockConfig).toHaveBeenNthCalledWith(2);
+    expect(mockConfig).toHaveBeenNthCalledWith(1, { path: REPO_ROOT_ENV, quiet: true });
+    expect(mockConfig).toHaveBeenNthCalledWith(2, { quiet: true });
   });
 
   it('does NOT fall back when ENV_FILE is set but the file is missing', () => {

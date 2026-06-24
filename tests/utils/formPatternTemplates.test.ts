@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { FormPatternTemplates } from '../../src/utils/formPatternTemplates';
+import { validateFormPatternXml } from '../../src/validation/formPatternValidator';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -118,31 +119,38 @@ describe('SimpleListDetails pattern', () => {
     expect(xml).toContain('AxFormActionPaneControl');
   });
 
-  it('has GridContainer with SidePanel pattern', () => {
+  it('has GridContainer as a SidePanel (Style, not a Pattern)', () => {
     expect(hasNamedControl(xml, 'GridContainer')).toBe(true);
-    expect(xml).toContain('<Pattern>SidePanel</Pattern>');
+    // SidePanel is a Style on the nav-list container, NOT a <Pattern> — the
+    // platform has no "SidePanel" sub-pattern (mining confirmed).
+    expect(xml).toContain('<Style>SidePanel</Style>');
+    expect(xml).not.toContain('<Pattern>SidePanel</Pattern>');
   });
 
   it('has QuickFilter inside GridContainer', () => {
     expect(hasNamedControl(xml, 'QuickFilterControl')).toBe(true);
   });
 
-  it('has Grid with List style', () => {
+  it('has a read-only List-style nav grid', () => {
     expect(hasNamedControl(xml, 'Grid')).toBe(true);
     expect(xml).toContain('<Style>List</Style>');
+    expect(xml).toContain('<AllowEdit>No</AllowEdit>');
   });
 
-  it('has DetailsGroup with Tab', () => {
-    expect(hasNamedControl(xml, 'DetailsGroup')).toBe(true);
+  it('has a DetailsHeader (FieldsFieldGroups) and a Details Tabs control', () => {
+    expect(hasNamedControl(xml, 'DetailsHeader')).toBe(true);
     expect(hasNamedControl(xml, 'Tab')).toBe(true);
   });
 
-  it('has Overview and General tab pages', () => {
-    expect(hasNamedControl(xml, 'TabPageOverview')).toBe(true);
+  it('sets ColumnsMode=Fill on FieldsFieldGroups containers', () => {
+    expect(xml).toContain('<ColumnsMode>Fill</ColumnsMode>');
+  });
+
+  it('has the General details tab page', () => {
     expect(hasNamedControl(xml, 'TabPageGeneral')).toBe(true);
   });
 
-  it('places detail fields in overview group', () => {
+  it('places detail fields in the details header overview group', () => {
     expect(hasNamedControl(xml, 'Overview_Field1')).toBe(true);
   });
 });
@@ -155,7 +163,7 @@ describe('DetailsMaster pattern', () => {
   it('generates valid XML with correct pattern', () => {
     expect(xml).toContain('<AxForm');
     expect(hasDesignProperty(xml, 'Pattern', 'DetailsMaster')).toBe(true);
-    expect(hasDesignProperty(xml, 'PatternVersion', '1.1')).toBe(true);
+    expect(hasDesignProperty(xml, 'PatternVersion', '1.4')).toBe(true);
     expect(hasDesignProperty(xml, 'Style', 'DetailsFormMaster')).toBe(true);
   });
 
@@ -176,17 +184,28 @@ describe('DetailsMaster pattern', () => {
     expect(xml).toContain('AxFormActionPaneControl');
   });
 
-  it('has NavigationFilterGroup with QuickFilter', () => {
-    expect(hasNamedControl(xml, 'NavigationFilterGroup')).toBe(true);
-    expect(xml).toContain('<Pattern>CustomAndQuickFilters</Pattern>');
+  it('has NavigationList (SidePanel) with QuickFilter and a List grid', () => {
+    // DetailsMaster 1.4 keeps a hidden NavigationList side panel (not a bare filter).
+    expect(hasNamedControl(xml, 'NavigationList')).toBe(true);
     expect(hasNamedControl(xml, 'QuickFilterControl')).toBe(true);
+    expect(xml).toContain('<Style>SidePanel</Style>');
   });
 
-  it('has HeaderGroup', () => {
-    expect(hasNamedControl(xml, 'HeaderGroup')).toBe(true);
+  it('has a Details Panel (DetailHeaderGroup + DetailTab) under the Panel Tab', () => {
+    // v1.4 wraps the detail view in FormTabPageDetail (PanelStyle=Details).
+    expect(hasNamedControl(xml, 'FormTabPageDetail')).toBe(true);
+    expect(hasNamedControl(xml, 'DetailHeaderGroup')).toBe(true);
+    expect(hasNamedControl(xml, 'DetailTab')).toBe(true);
+    expect(xml).toContain('<PanelStyle>Details</PanelStyle>');
   });
 
-  it('has Tab with FastTabs style', () => {
+  it('has a Grid Panel with a default action', () => {
+    expect(hasNamedControl(xml, 'FormTabPageGrid')).toBe(true);
+    expect(xml).toContain('<PanelStyle>Grid</PanelStyle>');
+    expect(xml).toContain('<DefaultAction>OverviewGridDefaultAction</DefaultAction>');
+  });
+
+  it('has Tab with FastTabs style on the inner detail tab', () => {
     expect(hasNamedControl(xml, 'Tab')).toBe(true);
     expect(xml).toContain('<Style>FastTabs</Style>');
   });
@@ -201,14 +220,12 @@ describe('DetailsMaster pattern', () => {
     expect(hasNamedControl(xml, 'Overview_Field2')).toBe(true);
   });
 
-  it('generates correct control hierarchy order: ActionPane → Filter → Header → Tab', () => {
+  it('generates correct control hierarchy order: ActionPane → NavigationList → Tab', () => {
     const actionPaneIdx = xml.indexOf('<Name>ActionPane</Name>');
-    const filterIdx = xml.indexOf('<Name>NavigationFilterGroup</Name>');
-    const headerIdx = xml.indexOf('<Name>HeaderGroup</Name>');
+    const navListIdx = xml.indexOf('<Name>NavigationList</Name>');
     const tabIdx = xml.indexOf('<Name>Tab</Name>');
-    expect(actionPaneIdx).toBeLessThan(filterIdx);
-    expect(filterIdx).toBeLessThan(headerIdx);
-    expect(headerIdx).toBeLessThan(tabIdx);
+    expect(actionPaneIdx).toBeLessThan(navListIdx);
+    expect(navListIdx).toBeLessThan(tabIdx);
   });
 });
 
@@ -225,7 +242,8 @@ describe('DetailsTransaction pattern', () => {
   it('generates valid XML with correct pattern', () => {
     expect(xml).toContain('<AxForm');
     expect(hasDesignProperty(xml, 'Pattern', 'DetailsTransaction')).toBe(true);
-    expect(hasDesignProperty(xml, 'PatternVersion', '1.1')).toBe(true);
+    // v1.4 is the only DetailsTransaction version shipped by the platform.
+    expect(hasDesignProperty(xml, 'PatternVersion', '1.4')).toBe(true);
     expect(hasDesignProperty(xml, 'Style', 'DetailsFormTransaction')).toBe(true);
   });
 
@@ -244,8 +262,9 @@ describe('DetailsTransaction pattern', () => {
     expect(matches!.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('uses Active LinkType for lines datasource (not InnerJoin)', () => {
-    expect(xml).toContain('<LinkType>Active</LinkType>');
+  it('links lines datasource to the header via JoinSource + Delayed link', () => {
+    expect(xml).toContain('<JoinSource>TestDS</JoinSource>');
+    expect(xml).toContain('<LinkType>Delayed</LinkType>');
     expect(xml).not.toContain('<LinkType>InnerJoin</LinkType>');
   });
 
@@ -260,19 +279,38 @@ describe('DetailsTransaction pattern', () => {
     expect(hasNamedControl(xml, 'ActionPane')).toBe(true);
   });
 
-  it('has NavigationFilterGroup with QuickFilter', () => {
-    expect(hasNamedControl(xml, 'NavigationFilterGroup')).toBe(true);
+  it('has a Navigation List (read-only header grid) required by v1.4', () => {
+    expect(hasNamedControl(xml, 'NavigationList')).toBe(true);
+    expect(hasNamedControl(xml, 'NavigationListGrid')).toBe(true);
     expect(hasNamedControl(xml, 'QuickFilterControl')).toBe(true);
+    // The nav list grid is a SidePanel, read-only, List-style grid bound to the header.
+    expect(xml).toContain('<Style>SidePanel</Style>');
+    expect(xml).toContain('<AllowEdit>No</AllowEdit>');
   });
 
-  it('has Tab with FastTabs style', () => {
-    expect(hasNamedControl(xml, 'Tab')).toBe(true);
+  it('Navigation List grid is bound to the header datasource', () => {
+    const gridIdx = xml.indexOf('<Name>NavigationListGrid</Name>');
+    expect(gridIdx).toBeGreaterThan(-1);
+    expect(xml.indexOf('<DataSource>TestDS</DataSource>', gridIdx)).toBeGreaterThan(-1);
+  });
+
+  it('has the v1.4 nested panel tabs (MainTab + DetailsTab) with FastTabs leaves', () => {
+    expect(hasNamedControl(xml, 'MainTab')).toBe(true);
+    expect(hasNamedControl(xml, 'DetailsTab')).toBe(true);
+    expect(hasNamedControl(xml, 'LineViewTab')).toBe(true);
     expect(xml).toContain('<Style>FastTabs</Style>');
   });
 
-  it('has Header and Lines tab pages', () => {
-    expect(hasNamedControl(xml, 'TabPageHeader')).toBe(true);
-    expect(hasNamedControl(xml, 'TabPageLines')).toBe(true);
+  it('pairs Details and Grid panels under MainTab', () => {
+    expect(hasNamedControl(xml, 'TabPageDetails')).toBe(true);
+    expect(hasNamedControl(xml, 'TabPageGrid')).toBe(true);
+    expect(xml).toContain('<PanelStyle>Details</PanelStyle>');
+    expect(xml).toContain('<PanelStyle>Grid</PanelStyle>');
+  });
+
+  it('has Line View header and lines pages', () => {
+    expect(hasNamedControl(xml, 'LineViewHeader')).toBe(true);
+    expect(hasNamedControl(xml, 'LineViewLines')).toBe(true);
   });
 
   it('has LinesGrid bound to lines datasource', () => {
@@ -280,12 +318,13 @@ describe('DetailsTransaction pattern', () => {
     expect(xml).toContain(`<DataSource>TestLines</DataSource>`);
   });
 
-  it('has LinesActionPane for line-level actions', () => {
-    expect(hasNamedControl(xml, 'LinesActionPane')).toBe(true);
+  it('carries a DetailTitleContainer header (HeaderInfo)', () => {
+    expect(hasNamedControl(xml, 'HeaderInfo')).toBe(true);
+    expect(xml).toContain('<Style>DetailTitleContainer</Style>');
   });
 
   it('HeaderGeneralGroup does not have redundant Pattern attribute', () => {
-    // The group inside TabPageHeader should not have its own Pattern=FieldsFieldGroups
+    // The group inside LineViewHeader should not have its own Pattern=FieldsFieldGroups
     const headerGroupIdx = xml.indexOf('<Name>HeaderGeneralGroup</Name>');
     expect(headerGroupIdx).toBeGreaterThan(-1);
     // Check the ~200 chars after HeaderGeneralGroup name — should have Type but not Pattern
@@ -368,9 +407,15 @@ describe('TableOfContents pattern', () => {
     expect(hasDesignProperty(xml, 'PatternVersion', '1.1')).toBe(true);
   });
 
-  it('has ActionPane control', () => {
-    expect(hasNamedControl(xml, 'ActionPane')).toBe(true);
-    expect(xml).toContain('AxFormActionPaneControl');
+  it('has no ActionPane — the TableOfContents pattern forbids one in Design', () => {
+    expect(hasNamedControl(xml, 'ActionPane')).toBe(false);
+    expect(xml).not.toContain('AxFormActionPaneControl');
+  });
+
+  it('wraps each section in a TOCTitleContainer + nested FastTab', () => {
+    expect(xml).toContain('<Style>TOCTitleContainer</Style>');
+    expect(xml).toContain('<Style>VerticalTabs</Style>');
+    expect(hasNamedControl(xml, 'TabPageGeneralFastTab')).toBe(true);
   });
 
   it('has DataSource on Design when dsName is provided', () => {
@@ -381,9 +426,11 @@ describe('TableOfContents pattern', () => {
     expect(xml).toContain('<InsertIfEmpty>No</InsertIfEmpty>');
   });
 
-  it('has Tab with TOCList style', () => {
+  it('has a TOC navigation Tab with no invalid TabStyle', () => {
+    // 'TOCList' is not a valid FormTabStyle enum — it makes xppc abort
+    // deserialization, which suppresses pattern validation for the whole build.
     expect(hasNamedControl(xml, 'Tab')).toBe(true);
-    expect(xml).toContain('<Style>TOCList</Style>');
+    expect(xml).not.toContain('<Style>TOCList</Style>');
   });
 
   it('generates tab pages from sections', () => {
@@ -424,14 +471,15 @@ describe('Lookup pattern', () => {
   const xml = FormPatternTemplates.buildLookup(defaultOpts);
 
   it('generates valid XML with correct pattern', () => {
-    expect(hasDesignProperty(xml, 'Pattern', 'Lookup')).toBe(true);
-    expect(hasDesignProperty(xml, 'PatternVersion', '1.2')).toBe(true);
+    // The installed platform exposes the grid-only lookup as 'LookupGridOnly' 1.1.
+    expect(hasDesignProperty(xml, 'Pattern', 'LookupGridOnly')).toBe(true);
+    expect(hasDesignProperty(xml, 'PatternVersion', '1.1')).toBe(true);
     expect(hasDesignProperty(xml, 'Style', 'Lookup')).toBe(true);
   });
 
-  it('has CustomFilterGroup with QuickFilter', () => {
-    expect(hasNamedControl(xml, 'CustomFilterGroup')).toBe(true);
-    expect(hasNamedControl(xml, 'QuickFilterControl')).toBe(true);
+  it('is grid-only — no filter group allowed by LookupGridOnly', () => {
+    expect(hasNamedControl(xml, 'CustomFilterGroup')).toBe(false);
+    expect(hasDesignProperty(xml, 'HeightMode', 'SizeToContent')).toBe(true);
   });
 
   it('has Grid with fields', () => {
@@ -447,7 +495,7 @@ describe('ListPage pattern', () => {
 
   it('generates valid XML with correct pattern', () => {
     expect(hasDesignProperty(xml, 'Pattern', 'ListPage')).toBe(true);
-    expect(hasDesignProperty(xml, 'PatternVersion', '1.1')).toBe(true);
+    expect(hasDesignProperty(xml, 'PatternVersion', 'UX7 1.0')).toBe(true);
     expect(hasDesignProperty(xml, 'Style', 'ListPage')).toBe(true);
   });
 
@@ -495,12 +543,17 @@ describe('Form pattern edge cases', () => {
     expect(hasNamedControl(xml, 'Tab')).toBe(true);
   });
 
-  it('DetailsTransaction uses default linesDsName when not provided', () => {
-    const xml = FormPatternTemplates.buildDetailsTransaction({
+  it('DetailsTransaction uses D365FO-correct default linesDsName when not provided', () => {
+    // SalesTable → SalesLine, Order → OrderLine  (strips Table suffix, adds singular Line)
+    const xmlTable = FormPatternTemplates.buildDetailsTransaction({
+      formName: 'SalesForm', dsName: 'SalesTable', dsTable: 'SalesTable',
+    });
+    expect(xmlTable).toContain('<Name>SalesLine</Name>');
+
+    const xmlNoSuffix = FormPatternTemplates.buildDetailsTransaction({
       formName: 'OrderForm', dsName: 'Order', dsTable: 'OrderTable',
     });
-    // Default: dsName + "Lines"
-    expect(xml).toContain('<Name>OrderLines</Name>');
+    expect(xmlNoSuffix).toContain('<Name>OrderLine</Name>');
   });
 
   it('caption is optional and omitted correctly', () => {
@@ -527,4 +580,62 @@ describe('Form pattern edge cases', () => {
       expect(xml).toContain('</AxForm>');
     }
   });
+});
+
+// ─── Control-type correctness ────────────────────────────────────────────────
+
+describe('typed field controls', () => {
+  const fieldTypes = new Map([
+    ['status', { iType: 'AxFormComboBoxControl', typeValue: 'ComboBox' }],
+    ['amount', { iType: 'AxFormRealControl', typeValue: 'Real' }],
+    ['name', { iType: 'AxFormStringControl', typeValue: 'String' }],
+  ]);
+  const opts = { ...defaultOpts, gridFields: ['Name', 'Status', 'Amount'], fieldTypes };
+
+  it('SimpleList renders the correct control type per field', () => {
+    const xml = FormPatternTemplates.buildSimpleList(opts);
+    expect(xml).toContain('i:type="AxFormComboBoxControl"');
+    expect(xml).toContain('<Type>ComboBox</Type>');
+    expect(xml).toContain('i:type="AxFormRealControl"');
+  });
+
+  it('defaults to string controls when no type map is given', () => {
+    const xml = FormPatternTemplates.buildSimpleList({ ...defaultOpts });
+    expect(xml).toContain('i:type="AxFormStringControl"');
+    expect(xml).not.toContain('AxFormComboBoxControl');
+  });
+
+  it('DetailsTransaction renders typed line-grid columns', () => {
+    const xml = FormPatternTemplates.buildDetailsTransaction({
+      ...opts,
+      linesDsName: 'Lines',
+      linesDsTable: 'LineT',
+      linesFields: ['Qty'],
+      linesFieldTypes: new Map([['qty', { iType: 'AxFormRealControl', typeValue: 'Real' }]]),
+    });
+    expect(xml).toContain('<Name>Line_Qty</Name>');
+    const idx = xml.indexOf('<Name>Line_Qty</Name>');
+    expect(xml.slice(idx - 120, idx)).toContain('AxFormRealControl');
+  });
+});
+
+// ─── Generated forms conform to their own pattern (no validator errors) ───────
+
+describe('generated forms pass the pattern validator', () => {
+  const cases: Array<[string, string]> = [
+    ['SimpleList', FormPatternTemplates.buildSimpleList(defaultOpts)],
+    ['SimpleListDetails', FormPatternTemplates.buildSimpleListDetails(defaultOpts)],
+    ['DetailsMaster', FormPatternTemplates.buildDetailsMaster(defaultOpts)],
+    ['DetailsTransaction', FormPatternTemplates.buildDetailsTransaction({
+      ...defaultOpts, linesDsName: 'Lines', linesDsTable: 'LineT', linesFields: ['Field1'],
+    })],
+  ];
+
+  for (const [name, xml] of cases) {
+    it(`${name} produces no pattern errors`, async () => {
+      const report = await validateFormPatternXml(xml);
+      const errors = report.violations.filter((v) => v.severity === 'error');
+      expect(errors, JSON.stringify(errors, null, 2)).toHaveLength(0);
+    });
+  }
 });

@@ -7,6 +7,7 @@
 import { FormPatternTemplates, FormPattern } from './formPatternTemplates.js';
 import { ensureXppDocComment } from './xppDocGen.js';
 import { decodeXmlEntitiesFromXppSource } from '../tools/modifyD365File.js';
+import { type FieldControlMap, controlForField } from './fieldControlTypes.js';
 
 export interface TableFieldSpec {
   name: string;
@@ -14,6 +15,9 @@ export interface TableFieldSpec {
   type?: string;
   mandatory?: boolean;
   label?: string;
+  /** Enum name for enum-backed fields (AxTableFieldEnum). When set, the field emits
+   *  <EnumType> instead of <ExtendedDataType>. */
+  enumType?: string;
 }
 
 export interface TableIndexSpec {
@@ -42,6 +46,10 @@ export interface FormControlSpec {
   type: 'Grid' | 'Group' | 'String' | 'Int64' | 'Real' | 'Date' | 'DateTime' | 'Button' | 'ActionPane';
   properties?: Record<string, string>;
   children?: FormControlSpec[];
+  /** Explicit AxForm control i:type override (e.g. 'AxFormComboBoxControl' for an enum field). */
+  iType?: string;
+  /** Explicit <Type> value override paired with {@link iType} (e.g. 'ComboBox'). */
+  typeValue?: string;
 }
 
 /**
@@ -397,14 +405,17 @@ export class SmartXmlBuilder {
    * NOT typed element names like <AxTableFieldString>.
    */
   private buildTableField(field: TableFieldSpec): string {
-    const { name, edt, type, mandatory, label } = field;
+    const { name, edt, type, mandatory, label, enumType } = field;
 
-    const iType = this.getAxTableFieldType(edt, type);
+    // Enum-backed fields use AxTableFieldEnum + <EnumType>, never <ExtendedDataType>.
+    const iType = enumType ? 'AxTableFieldEnum' : this.getAxTableFieldType(edt, type);
 
     // D365FO field format: <AxTableField xmlns="" i:type="AxTableFieldString">
     let xml = `\t\t<AxTableField xmlns=""\n\t\t\t\ti:type="${iType}">\n`;
     xml += `\t\t\t<Name>${name}</Name>\n`;
-    if (edt) {
+    if (enumType) {
+      xml += `\t\t\t<EnumType>${enumType}</EnumType>\n`;
+    } else if (edt) {
       xml += `\t\t\t<ExtendedDataType>${edt}</ExtendedDataType>\n`;
     }
     if (mandatory) {
@@ -560,7 +571,11 @@ export class SmartXmlBuilder {
       Button:     { iType: 'AxFormButtonControl',     typeValue: 'Button' },
       ActionPane: { iType: 'AxFormActionPaneControl', typeValue: 'ActionPane' },
     };
-    const mapped = typeMap[type] ?? { iType: 'AxFormStringControl', typeValue: 'String' };
+    // An explicit per-control override (set by buildGridControl for typed fields)
+    // wins over the coarse FormControlSpec.type mapping.
+    const mapped = control.iType && control.typeValue
+      ? { iType: control.iType, typeValue: control.typeValue }
+      : typeMap[type] ?? { iType: 'AxFormStringControl', typeValue: 'String' };
 
     // All AxFormControl nodes need xmlns="" to override the AxForm default namespace
     let xml = `${indent}<AxFormControl xmlns=""\n${indent}\ti:type="${mapped.iType}">\n`;
@@ -616,17 +631,24 @@ export class SmartXmlBuilder {
   /**
    * Generate form grid control with fields
    */
-  buildGridControl(name: string, dataSource: string, fields: string[]): FormControlSpec {
-    const gridChildren: FormControlSpec[] = fields.map(field => ({
-      // Prefix with dataSource to avoid name collisions when multiple grids exist
-      name: `${dataSource}_${field}`,
-      type: 'String',
-      properties: {
-        // DataField MUST come before DataSource — matches real D365FO AOT XML element order
-        DataField: field,
-        DataSource: dataSource,
-      },
-    }));
+  buildGridControl(name: string, dataSource: string, fields: string[], fieldTypes?: FieldControlMap): FormControlSpec {
+    const gridChildren: FormControlSpec[] = fields.map(field => {
+      // Resolve the correct control type per field (enum→ComboBox, date→Date, …);
+      // unknown fields fall back to a string control.
+      const ctl = controlForField(field, fieldTypes);
+      return {
+        // Prefix with dataSource to avoid name collisions when multiple grids exist
+        name: `${dataSource}_${field}`,
+        type: 'String' as const,
+        iType: ctl.iType,
+        typeValue: ctl.typeValue,
+        properties: {
+          // DataField MUST come before DataSource — matches real D365FO AOT XML element order
+          DataField: field,
+          DataSource: dataSource,
+        },
+      };
+    });
 
     return {
       name,

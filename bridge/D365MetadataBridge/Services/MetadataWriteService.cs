@@ -41,7 +41,16 @@ namespace D365MetadataBridge.Services
         // ========================
 
         /// <summary>
-        /// Resolves a model name to ModelSaveInfo by reading model descriptor XML files.
+        /// Resolves a model name to ModelSaveInfo.
+        ///
+        /// PREFERRED: the provider's model manifest, which gives the model's real runtime
+        /// identity — the small ordinal Id AND the SequenceId. This matters because the
+        /// model descriptor's &lt;Id&gt; element is actually the SequenceId (a large number);
+        /// parsing it into ModelSaveInfo.Id while leaving SequenceId=0 makes
+        /// IMetadataProvider.Create() throw NullReferenceException. (Verified: fm-mcp manifest
+        /// Id=116 SequenceId=896000930 creates fine; descriptor-derived Id=896000930
+        /// SequenceId=0 NREs.) The descriptor scan stays as a fallback for models the
+        /// manifest does not enumerate (e.g. not yet built/registered).
         /// Caches results for repeated calls.
         /// </summary>
         public ModelSaveInfo? ResolveModelSaveInfo(string modelName)
@@ -49,6 +58,13 @@ namespace D365MetadataBridge.Services
             if (_modelCache.TryGetValue(modelName, out var cached))
                 return cached;
 
+            // Preferred: authoritative identity from the runtime model manifest.
+            var fromManifest = ResolveModelSaveInfoFromManifest(modelName);
+            if (fromManifest != null) { _modelCache[modelName] = fromManifest; return fromManifest; }
+
+            // Fallback: descriptor scan. Note the Id/SequenceId caveat above — this path
+            // can yield a ModelSaveInfo the create API rejects, but it is the best we can do
+            // when the model is absent from the manifest.
             // Scan {packagesPath}/{*}/Descriptor/{modelName}.xml
             // First try the direct path (most models: package name = model name)
             var directPath = Path.Combine(_packagesPath, modelName, "Descriptor", modelName + ".xml");
@@ -81,6 +97,30 @@ namespace D365MetadataBridge.Services
             return null;
         }
 
+        /// <summary>
+        /// Resolves ModelSaveInfo from the provider's model manifest by model name, capturing
+        /// the real runtime Id + SequenceId (see ResolveModelSaveInfo remarks). Returns null
+        /// when the model is not enumerated by the manifest.
+        /// </summary>
+        private ModelSaveInfo? ResolveModelSaveInfoFromManifest(string modelName)
+        {
+            try
+            {
+                var manifest = _provider.ModelManifest;
+                if (manifest == null) return null;
+                foreach (var mi in manifest.ListModelInfos())
+                {
+                    if (string.Equals(mi.Name, modelName, StringComparison.OrdinalIgnoreCase))
+                        return new ModelSaveInfo { Id = mi.Id, Layer = mi.Layer, Name = mi.Name, SequenceId = mi.SequenceId };
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[WriteService] Manifest model lookup failed for '{modelName}': {ex.Message}");
+            }
+            return null;
+        }
+
         private ModelSaveInfo? ParseModelDescriptor(string xmlPath, string targetModelName)
         {
             try
@@ -106,10 +146,15 @@ namespace D365MetadataBridge.Services
                     return null;
                 }
 
+                // Name is REQUIRED for Create: the SDK routes a brand-new object to its
+                // model folder via ModelSaveInfo.Name. Leaving it null is why createObject
+                // threw NullReferenceException while modify (Update) — which already knows
+                // the existing object's location — worked fine.
                 return new ModelSaveInfo
                 {
                     Id = id,
-                    Layer = layer
+                    Layer = layer,
+                    Name = targetModelName
                 };
             }
             catch (Exception ex)
@@ -622,7 +667,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateQuery(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
 
             // AxQuery is abstract. Use reflection to try AxQuerySimple first.
             // If that fails, fall back by creating a dynamic instance.
@@ -668,7 +714,8 @@ namespace D365MetadataBridge.Services
             List<WriteFieldParam>? fields,
             Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axView = new AxView { Name = name };
 
             if (properties != null)
@@ -697,7 +744,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateMenuItemAction(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axMI = new AxMenuItemAction { Name = name };
 
             if (properties != null)
@@ -719,7 +767,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateMenuItemDisplay(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axMI = new AxMenuItemDisplay { Name = name };
 
             if (properties != null)
@@ -741,7 +790,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateMenuItemOutput(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axMI = new AxMenuItemOutput { Name = name };
 
             if (properties != null)
@@ -763,7 +813,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateSecurityPrivilege(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axObj = new AxSecurityPrivilege { Name = name };
 
             if (properties != null)
@@ -785,7 +836,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateSecurityDuty(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axObj = new AxSecurityDuty { Name = name };
 
             if (properties != null)
@@ -807,7 +859,8 @@ namespace D365MetadataBridge.Services
         /// </summary>
         public object CreateSecurityRole(string name, string modelName, Dictionary<string, string>? properties)
         {
-            var msi = ResolveModelSaveInfo(modelName);
+            var msi = ResolveModelSaveInfo(modelName)
+                ?? throw new ArgumentException($"Model '{modelName}' not found in {_packagesPath}");
             var axObj = new AxSecurityRole { Name = name };
 
             if (properties != null)
@@ -1060,6 +1113,28 @@ namespace D365MetadataBridge.Services
         /// Adds or replaces a method on a class or table.
         /// Read → add/replace method → Update.
         /// </summary>
+        /// <summary>Finds a form data source by name (case-insensitive); null if absent.</summary>
+        private static object? FindFormDataSource(dynamic axForm, string dsName)
+        {
+            foreach (var ds in axForm.DataSources)
+            {
+                if (string.Equals((string)((dynamic)ds).Name, dsName, StringComparison.OrdinalIgnoreCase))
+                    return (object)ds;
+            }
+            return null;
+        }
+
+        /// <summary>Finds a field on a form data source by name (case-insensitive); null if absent.</summary>
+        private static object? FindDsField(dynamic dataSource, string fieldName)
+        {
+            foreach (var f in dataSource.Fields)
+            {
+                if (string.Equals((string)((dynamic)f).Name, fieldName, StringComparison.OrdinalIgnoreCase))
+                    return (object)f;
+            }
+            return null;
+        }
+
         public object AddMethod(string objectType, string objectName, string methodName, string source)
         {
             switch (objectType.ToLowerInvariant())
@@ -1106,6 +1181,39 @@ namespace D365MetadataBridge.Services
                     var axForm = _provider.Forms.Read(objectName)
                         ?? throw new ArgumentException($"Form '{objectName}' not found");
                     var msi = GetModelSaveInfoForObject(_provider.Forms, objectName);
+                    var formProvider = _provider.Forms as IMetaFormProvider
+                        ?? throw new InvalidOperationException("IMetaFormProvider not available");
+
+                    // Route a dotted methodName to a data-source (or data-source-field)
+                    // override when the first segment is an actual data source on the form:
+                    //   "DataSource.method"       → override on the form data source
+                    //   "DataSource.Field.method" → override on a data-source field
+                    // Without this the method is added as a FORM-CLASS method, where e.g.
+                    // a data source initValue()'s super() binds to FormRun.initValue and fails
+                    // to compile. Control overrides ("Button.clicked" — first segment is NOT a
+                    // data source) fall through to the form-class path below unchanged.
+                    var dotParts = methodName.Split('.');
+                    if (dotParts.Length is 2 or 3)
+                    {
+                        dynamic? ds = FindFormDataSource(axForm, dotParts[0]);
+                        if (ds != null)
+                        {
+                            var leaf = dotParts[dotParts.Length - 1];
+                            var dsMethod = new AxMethod { Name = leaf, Source = source };
+                            if (dotParts.Length == 2)
+                            {
+                                ds.AddMethod(dsMethod);
+                            }
+                            else
+                            {
+                                dynamic field = FindDsField(ds, dotParts[1])
+                                    ?? throw new ArgumentException($"Field '{dotParts[1]}' not found on data source '{dotParts[0]}' of form '{objectName}'");
+                                field.AddMethod(dsMethod);
+                            }
+                            formProvider.Update(axForm, msi);
+                            return new { success = true, operation = "add-method", objectType, objectName, methodName, api = "IMetaFormProvider.Update (data source override)" };
+                        }
+                    }
 
                     if (!TryUpdateMethodSourceInPlace(axForm, methodName, source))
                     {
@@ -1113,8 +1221,6 @@ namespace D365MetadataBridge.Services
                         axForm.AddMethod(axMethod);
                     }
 
-                    var formProvider = _provider.Forms as IMetaFormProvider
-                        ?? throw new InvalidOperationException("IMetaFormProvider not available");
                     formProvider.Update(axForm, msi);
 
                     return new { success = true, operation = "add-method", objectType, objectName, methodName, api = "IMetaFormProvider.Update" };
@@ -2123,58 +2229,39 @@ namespace D365MetadataBridge.Services
                 ?? throw new ArgumentException($"Menu '{menuName}' not found");
             var msi = GetModelSaveInfoForObject(_provider.Menus, menuName);
 
-            // Use dynamic dispatch — AxMenu.MenuItems hierarchy varies by SDK version.
-            // Menu element items are NOT the standalone AxMenuItemDisplay/Action/Output types;
-            // they are AxMenuElementMenuItem* types (or similar).
-            dynamic dynMenu = axMenu;
-
             var itemType = (menuItemType ?? "display").ToLowerInvariant();
-            var assembly = typeof(AxClass).Assembly;
 
-            // Discover the correct element type for menu item references
-            string[] candidateTypeNames = itemType switch
+            // Idempotency: menu Elements is a KeyedObjectCollection keyed by Name. Adding a
+            // duplicate fails inside the SDK and surfaces as an opaque NullReferenceException,
+            // so skip when the item is already on the menu (it is then already correct).
+            if (axMenu.Elements != null)
             {
-                "display" => new[] {
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuElementMenuItemDisplay",
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuItemDisplayReference" },
-                "action" => new[] {
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuElementMenuItemAction",
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuItemActionReference" },
-                "output" => new[] {
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuElementMenuItemOutput",
-                    "Microsoft.Dynamics.AX.Metadata.MetaModel.AxMenuItemOutputReference" },
-                _ => throw new ArgumentException($"Unsupported menu item type: '{menuItemType}'. Use 'display', 'action', or 'output'."),
-            };
-
-            Type? elementType = null;
-            foreach (var name in candidateTypeNames)
-            {
-                elementType = assembly.GetType(name);
-                if (elementType != null) break;
-            }
-
-            // Last resort: iterate MenuItems to find element base type, then find subclass for our item type
-            if (elementType == null)
-            {
-                // Try to get the collection's generic argument as the base type
-                dynamic menuItems = dynMenu.MenuItems;
-                var collType = ((object)menuItems).GetType();
-                if (collType.IsGenericType)
+                foreach (var existing in axMenu.Elements)
                 {
-                    var baseElemType = collType.GetGenericArguments()[0];
-                    // Find a subclass whose name contains "display"/"action"/"output"
-                    elementType = assembly.GetTypes()
-                        .FirstOrDefault(t => baseElemType.IsAssignableFrom(t) && !t.IsAbstract
-                            && t.Name.IndexOf(itemType, StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (string.Equals((string)((dynamic)existing).Name, menuItemName, StringComparison.OrdinalIgnoreCase))
+                        return new { success = true, operation = "add-menu-item-to-menu", objectName = menuName, menuItemName, menuItemType = itemType, skipped = true, reason = $"menu item '{menuItemName}' already on menu '{menuName}'", api = "IMetaMenuProvider.Update" };
                 }
             }
 
-            if (elementType == null)
-                throw new InvalidOperationException($"Cannot determine menu element type for '{itemType}' — use xmlContent fallback");
-
-            dynamic menuItem = Activator.CreateInstance(elementType)!;
-            menuItem.Name = menuItemName;
-            dynMenu.MenuItems.Add(menuItem);
+            // AxMenu holds AxMenuElement children in `Elements` (added via AddElement) — NOT
+            // a `MenuItems` collection. A menu-item reference is an AxMenuElementMenuItem whose
+            // MenuItemType (Display/Action/Output) discriminates the referenced item kind.
+            // NOTE: MenuItemType lives in the Core assembly (Microsoft.Dynamics.AX.Metadata.Core),
+            // a DIFFERENT assembly than AxMenuElementMenuItem — reference both directly rather
+            // than via typeof(AxClass).Assembly.GetType(), which only sees the one assembly.
+            var element = new AxMenuElementMenuItem
+            {
+                Name = menuItemName,
+                MenuItemName = menuItemName,
+                MenuItemType = itemType switch
+                {
+                    "display" => Microsoft.Dynamics.AX.Metadata.Core.MetaModel.MenuItemType.Display,
+                    "action" => Microsoft.Dynamics.AX.Metadata.Core.MetaModel.MenuItemType.Action,
+                    "output" => Microsoft.Dynamics.AX.Metadata.Core.MetaModel.MenuItemType.Output,
+                    _ => throw new ArgumentException($"Unsupported menu item type: '{menuItemType}'. Use 'display', 'action', or 'output'."),
+                },
+            };
+            axMenu.AddElement(element);
 
             ((IMetaMenuProvider)_provider.Menus).Update(axMenu, msi);
             return new { success = true, operation = "add-menu-item-to-menu", objectName = menuName, menuItemName, menuItemType = itemType, api = "IMetaMenuProvider.Update" };
@@ -2222,13 +2309,32 @@ namespace D365MetadataBridge.Services
                         ?? throw new ArgumentException($"Form '{objectName}' not found");
                     var msi = GetModelSaveInfoForObject(_provider.Forms, objectName);
 
-                    // AxFormDataSource hierarchy is abstract — find concrete type via reflection
-                    // (same pattern as CreateFormControl for abstract AxFormControl types)
+                    // Idempotency: don't append a duplicate. If a data source with the same
+                    // NAME already exists, skip (it may be a template stub already bound to the
+                    // right table). If a DIFFERENT-named data source already binds the same
+                    // TABLE, skip too — adding a second binding to the same table is almost
+                    // always an accident (a stub the caller meant to replace, not duplicate).
+                    foreach (var existing in axForm.DataSources)
+                    {
+                        dynamic dyn = existing;
+                        if (string.Equals((string)dyn.Name, dsName, StringComparison.OrdinalIgnoreCase))
+                            return new { success = true, operation = "add-data-source", objectType, objectName, dsName, table, skipped = true, reason = $"data source '{dsName}' already exists", api = "IMetaFormProvider.Update" };
+                        if (string.Equals((string)dyn.Table, table, StringComparison.OrdinalIgnoreCase))
+                            return new { success = true, operation = "add-data-source", objectType, objectName, dsName, table, skipped = true, reason = $"data source '{(string)dyn.Name}' already binds table '{table}'", api = "IMetaFormProvider.Update" };
+                    }
+
+                    // AxFormDataSource hierarchy is abstract. A top-level form data source
+                    // MUST be an AxFormDataSourceRoot — picking the first concrete
+                    // AxFormDataSourceConcrete subtype can yield AxFormDataSourceReferenced
+                    // (used for nested/referenced sources), which AxForm.AddDataSource then
+                    // fails to cast to AxFormDataSourceRoot. Resolve the Root type explicitly.
                     var assembly = typeof(AxClass).Assembly;
-                    var dsType = assembly.GetTypes()
-                        .FirstOrDefault(t => typeof(AxFormDataSourceConcrete).IsAssignableFrom(t) && !t.IsAbstract)
+                    var dsType = assembly.GetType("Microsoft.Dynamics.AX.Metadata.MetaModel.AxFormDataSourceRoot")
+                        ?? assembly.GetTypes().FirstOrDefault(t =>
+                               typeof(AxFormDataSourceConcrete).IsAssignableFrom(t) && !t.IsAbstract
+                               && t.Name == "AxFormDataSourceRoot")
                         ?? throw new InvalidOperationException(
-                            "No concrete AxFormDataSource type found in metadata assembly — use xmlContent fallback");
+                            "AxFormDataSourceRoot type not found in metadata assembly — use xmlContent fallback");
                     dynamic ds = Activator.CreateInstance(dsType)!;
                     ds.Name = dsName;
                     ds.Table = table;
@@ -3247,7 +3353,7 @@ namespace D365MetadataBridge.Services
                 {
                     foreach (ModelInfo mi in modelInfos)
                     {
-                        return new ModelSaveInfo { Id = mi.Id, Layer = mi.Layer };
+                        return new ModelSaveInfo { Id = mi.Id, Layer = mi.Layer, Name = mi.Name, SequenceId = mi.SequenceId };
                     }
                 }
             }
@@ -3257,7 +3363,7 @@ namespace D365MetadataBridge.Services
             ModelInfo? foundMi = TryGetModelInfoFromProviders(objectName);
             if (foundMi != null)
             {
-                return new ModelSaveInfo { Id = foundMi.Id, Layer = foundMi.Layer };
+                return new ModelSaveInfo { Id = foundMi.Id, Layer = foundMi.Layer, Name = foundMi.Name, SequenceId = foundMi.SequenceId };
             }
 
             // Strategy 3: infer model from on-disk file path
@@ -3265,6 +3371,8 @@ namespace D365MetadataBridge.Services
             //   We scan common AOT folders for the object name.
             string[] aotFolders = { "AxClass", "AxTable", "AxForm", "AxEnum", "AxEdt",
                                     "AxQuery", "AxView", "AxDataEntityView", "AxReport",
+                                    "AxMenu", "AxMenuItemDisplay", "AxMenuItemAction", "AxMenuItemOutput",
+                                    "AxSecurityPrivilege", "AxSecurityDuty", "AxSecurityRole",
                                     "AxTableExtension", "AxFormExtension", "AxClassExtension",
                                     "AxEnumExtension" };
             try

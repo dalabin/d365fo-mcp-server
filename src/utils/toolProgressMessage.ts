@@ -42,7 +42,44 @@ export function buildProgressMessage(toolName: string, args: Record<string, any>
       }
     case 'd365fo_file':
       switch (a.action) {
-        case 'modify':   return `✏️ ${a.operation ?? 'Modifying'} on ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+        case 'modify': {
+          const op = a.operation ?? 'modify';
+          const obj = `${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+          switch (op) {
+            case 'add-index':
+            case 'remove-index': {
+              const fields = Array.isArray(a.indexFields)
+                ? a.indexFields.map((f: any) => f.fieldName ?? f).join(', ')
+                : '';
+              return `✏️ ${op} "${a.indexName ?? ''}"${fields ? ` [${fields}]` : ''} on ${obj}`;
+            }
+            case 'add-relation':
+            case 'remove-relation': {
+              const constraints = Array.isArray(a.relationConstraints)
+                ? a.relationConstraints.map((c: any) => `${c.fieldName ?? c.field} → ${c.relatedFieldName ?? c.relatedField}`).join(', ')
+                : '';
+              return `✏️ ${op} "${a.relationName ?? ''}"${a.relatedTable ? ` → ${a.relatedTable}` : ''}${constraints ? ` [${constraints}]` : ''} on ${obj}`;
+            }
+            case 'modify-property':
+              return `✏️ ${op} ${a.propertyPath ?? ''}${a.propertyValue !== undefined ? ` = ${String(a.propertyValue).slice(0, 40)}` : ''} on ${obj}`;
+            case 'add-method':
+            case 'remove-method':
+            case 'add-table-method':
+            case 'add-display-method':
+              return `✏️ ${op} "${a.methodName ?? ''}" on ${obj}`;
+            case 'add-field':
+            case 'modify-field':
+            case 'rename-field':
+            case 'remove-field':
+              return `✏️ ${op} "${a.fieldName ?? ''}"${a.fieldNewName ? ` → "${a.fieldNewName}"` : ''} on ${obj}`;
+            case 'add-enum-value':
+            case 'modify-enum-value':
+            case 'remove-enum-value':
+              return `✏️ ${op} "${a.enumValueName ?? ''}" on ${obj}`;
+            default:
+              return `✏️ ${op} on ${obj}`;
+          }
+        }
         case 'generate': return `🔧 Generating XML for ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
         default:         return `📁 Creating ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
       }

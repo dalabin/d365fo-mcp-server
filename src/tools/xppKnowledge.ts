@@ -613,26 +613,69 @@ class MyReportDP extends SRSReportDataProviderBase
       'Number sequences generate unique, configurable identifiers for master data and transactions. ' +
       'They support scope (shared, company, legal entity) and format segments.',
     rules: [
-      'Define in NumberSequenceModuleXxx class (e.g. NumberSequenceModuleCustPaym)',
-      'loadModule() method: register each number sequence reference with its EDT, label, and scope',
-      'Use NumberSeqFormHandler on forms for auto-number behavior',
-      'Continuous sequences: no gaps allowed — performance impact, use only when legally required',
-      'Non-continuous (default): allows gaps — faster, use for internal IDs',
-      'Call NumberSeq::newGetNum() to fetch next number at runtime',
-      'Scope: DataArea (per-company), Global (cross-company), OperatingUnit',
-      'Format: {Company}-{NumberSequence:#######} — configurable in Number sequences form',
+      'Module class EXTENDS NumberSeqApplicationModule — exact name. ❌ NOT "NumberSequenceApplicationModule" (that class does not exist).',
+      'It is a subclass (extends), so override loadModule() and call super() at the top. ❌ NOT next() — next() is ONLY for [ExtensionOf] CoC classes, never for an extends subclass.',
+      'loadModule() registers each reference with NumberSeqDatatype::construct(), then parmDatatypeId(extendedTypeNum(MyEdt)) + parmWizardIsContinuous/parmWizardIsManual/parmWizardIsChangeDownAllowed/… , then this.create(datatype). ❌ Do NOT assign fields on a NumberSeqReference/NumberSequenceReference buffer (DataTypeId, WizardContinuous, AllowManual… are parm*() methods on NumberSeqDatatype, NOT table fields) and there is NO this.addModuleEntry().',
+      'Override numberSeqModule() to return your NumberSeqModule enum value.',
+      'A new module class is NOT auto-loaded: extend the NumberSeqModule enum and register the module via an event handler on NumberSeqGlobal (or CoC) so loadModule() runs.',
+      'Form auto-numbering: NumberSeqFormHandler::newForm(<ParametersTable>::numRef<Id>().NumberSequenceId, element, <datasource>, fieldNum(<Table>, <Id>)). First arg is a RefRecId via the .NumberSequenceId field. ❌ NOT .NumberSequence and ❌ NOT a string code.',
+      'Runtime fetch: NumberSeqReference::findReference(extendedTypeNum(MyId)) → NumberSeq::newGetNum(ref) → .num(); call .abort() to release on rollback.',
+      'Continuous (no gaps): perf cost — only when legally required. Non-continuous (default) allows gaps, faster for internal IDs.',
+      'Scope: DataArea (per-company), Global (cross-company), OperatingUnit.',
+      'Verify exact parm*() names against the SDK with get_object_info(objectType="class", name="NumberSeqDatatype") before relying on them.',
     ],
     examples: [
       {
-        label: 'Fetching next number',
+        label: 'Module class — register the reference in loadModule() (correct API)',
+        code: `public class NumberSeqModuleAslRent extends NumberSeqApplicationModule
+{
+    protected void loadModule()
+    {
+        NumberSeqDatatype datatype = NumberSeqDatatype::construct();
+        datatype.parmDatatypeId(extendedTypeNum(AslRentEquipmentId));
+        datatype.parmReferenceHelp(literalStr("Equipment ID"));
+        datatype.parmWizardIsContinuous(false);
+        datatype.parmWizardIsManual(NoYes::No);
+        datatype.parmWizardIsChangeDownAllowed(NoYes::Yes);
+        datatype.parmWizardIsChangeUpAllowed(NoYes::Yes);
+        datatype.parmWizardHighest(0);
+        datatype.parmSortField(1);
+        datatype.addParameterType(NumberSeqParameterType::DataArea, true, false);
+        this.create(datatype);            // NOT a NumberSeqReference field assignment
+    }
+
+    public NumberSeqModule numberSeqModule()
+    {
+        return NumberSeqModule::AslRent;  // your NumberSeqModule enum value
+    }
+}`,
+      },
+      {
+        label: 'Form auto-numbering handler',
+        code: `NumberSeqFormHandler numberSeqFormHandler;   // form member
+
+public NumberSeqFormHandler numberSeqFormHandler()
+{
+    if (!numberSeqFormHandler)
+    {
+        numberSeqFormHandler = NumberSeqFormHandler::newForm(
+            AslRentParameters::numRefAslRentEquipmentId().NumberSequenceId, // RefRecId, not a string
+            element,
+            AslRentEquipmentTable_ds,
+            fieldNum(AslRentEquipmentTable, AslRentEquipmentId));
+    }
+    return numberSeqFormHandler;
+}`,
+      },
+      {
+        label: 'Fetching next number at runtime',
         code: `NumberSequenceReference numSeqRef =
-    NumberSeqReference::findReference(
-        extendedTypeNum(MyDocumentId));
+    NumberSeqReference::findReference(extendedTypeNum(AslRentEquipmentId));
 
 NumberSeq numSeq = NumberSeq::newGetNum(numSeqRef);
-MyDocumentId newId = numSeq.num();
+AslRentEquipmentId newId = numSeq.num();
 
-// If insert fails, release the number:
+// If the insert is rolled back, release the number:
 // numSeq.abort();`,
       },
     ],

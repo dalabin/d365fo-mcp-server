@@ -35,6 +35,18 @@ describe('generateTableMethodSource', () => {
     expect(note).toMatch(/Could not resolve the EDT/i);
   });
 
+  it('ignores a base-type signature ("String") and uses the field name, not an invalid X++ type', () => {
+    // The symbol index stores a field's BASE TYPE in signature (e.g. "String"), not its
+    // EDT. "String" is not a valid X++ parameter type — the generator must fall back to
+    // the field name (conventionally the EDT) rather than emit `find(String _id)`.
+    const { source, note } = generateTableMethodSource(
+      'ContosoRentEquipmentTable', 'find', 'ContosoRentEquipmentId', fakeDb('String'),
+    );
+    expect(source).toContain('find(ContosoRentEquipmentId _contosoRentEquipmentId,');
+    expect(source).not.toMatch(/find\(String /);
+    expect(note).toMatch(/Could not resolve the EDT/i);
+  });
+
   it('generates an exist method returning boolean', () => {
     const { methodName, source } = generateTableMethodSource(
       'MyTable', 'exist', 'ItemId', fakeDb('ItemId'),

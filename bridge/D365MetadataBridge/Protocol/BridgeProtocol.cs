@@ -94,7 +94,23 @@ namespace D365MetadataBridge.Protocol
             var dict = new Dictionary<string, string>();
             foreach (var kv in prop.EnumerateObject())
             {
-                dict[kv.Name] = kv.Value.GetString() ?? kv.Value.GetRawText();
+                // GetString() THROWS on any kind other than String/Null — it does not
+                // return null for booleans/numbers/arrays. The old `GetString() ?? …`
+                // therefore crashed the whole request with "requires an element of type
+                // 'String', but the target element has type 'True'/'Array'" whenever a
+                // caller put a non-string value in the map. Coerce by kind instead.
+                switch (kv.Value.ValueKind)
+                {
+                    case JsonValueKind.String:
+                        dict[kv.Name] = kv.Value.GetString() ?? string.Empty;
+                        break;
+                    case JsonValueKind.Null:
+                        break; // omit null-valued properties
+                    default:
+                        // bool/number/array/object → raw JSON token ("true", "42", "[…]")
+                        dict[kv.Name] = kv.Value.GetRawText();
+                        break;
+                }
             }
             return dict;
         }

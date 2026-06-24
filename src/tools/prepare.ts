@@ -22,8 +22,8 @@ export type PrepareMode = (typeof PREPARE_MODES)[number];
 
 const PrepareArgsSchema = z
   .object({
-    mode: z.enum(PREPARE_MODES).describe(
-      'change → aggregate context for extending/modifying an existing object; ' +
+    mode: z.enum(PREPARE_MODES).default('change').describe(
+      'change (default) → aggregate context for extending/modifying an existing object; ' +
       'create → aggregate context for a brand-new object.',
     ),
   })
@@ -36,8 +36,13 @@ function subRequest(name: string, args: Record<string, unknown>): CallToolReques
 export async function prepareTool(request: CallToolRequest, context: XppServerContext) {
   const parsed = PrepareArgsSchema.safeParse(request.params.arguments ?? {});
   if (!parsed.success) {
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const modeArg = args['mode'];
+    const modeMsg = modeArg === undefined
+      ? `❌ prepare: missing required parameter "mode".\n\nUsage:\n  prepare(mode="change", objectName="...", methodName="...")  — extend/modify an existing object\n  prepare(mode="create", objectName="...", objectType="...")   — plan a new object`
+      : `❌ prepare: invalid mode "${modeArg}". Valid values: "change", "create".\n\n  prepare(mode="change", objectName="...", methodName="...")  — extend/modify an existing object\n  prepare(mode="create", objectName="...", objectType="...")   — plan a new object`;
     return {
-      content: [{ type: 'text', text: `❌ prepare: invalid arguments — ${parsed.error.message}` }],
+      content: [{ type: 'text', text: modeMsg }],
       isError: true,
     };
   }

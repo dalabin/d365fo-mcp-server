@@ -13,7 +13,7 @@ import { registerCustomModel, resolveObjectPrefix, applyObjectPrefix, getObjectS
 import { PackageResolver } from '../utils/packageResolver.js';
 import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../utils/xppDocGen.js';
 import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
-import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject } from '../bridge/index.js';
+import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject, bridgeRefreshProvider } from '../bridge/index.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnFormPatternErrors } from './validateFormPattern.js';
 import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
@@ -3908,12 +3908,27 @@ export async function handleCreateD365File(
     // (report, data-entity, tile, kpi, business-event, etc.).
     if (!args.xmlContent && context?.bridge && actualModelName && canBridgeCreate(args.objectType)) {
       try {
+        // The bridge's `properties` is a flat string map (C# Dictionary<string,string>).
+        // Keep only SCALAR values and stringify them. Structured collections
+        // (fields/fieldGroups/indexes/relations/values/enumValues/methods) are
+        // arrays/objects passed via their own bridge params below — if they leak into
+        // `properties` the C# GetDictParam calls GetString() on a JSON array/boolean and
+        // the whole create throws ("requires an element of type 'String', but the target
+        // element has type 'Array'/'True'").
+        const scalarProperties: Record<string, string> | undefined = args.properties
+          ? Object.fromEntries(
+              Object.entries(args.properties as Record<string, unknown>)
+                .filter(([, v]) => v != null && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'))
+                .map(([k, v]) => [k, String(v)]),
+            )
+          : undefined;
+
         // Prepare parameters for the bridge
         const bridgeParams: Parameters<typeof bridgeCreateObject>[1] = {
           objectType: args.objectType,
           objectName: finalObjectName,
           modelName: actualModelName,
-          properties: (args.properties as Record<string, string>) ?? undefined,
+          properties: scalarProperties && Object.keys(scalarProperties).length > 0 ? scalarProperties : undefined,
         };
 
         // For classes: parse sourceCode into declaration + methods
@@ -3995,6 +4010,10 @@ export async function handleCreateD365File(
             }
           }
 
+          // Eagerly refresh the bridge provider so the new object is immediately
+          // resolvable by subsequent modify calls in the same session.
+          try { await bridgeRefreshProvider(context.bridge); } catch { /* best-effort */ }
+
           return {
             content: [
               {
@@ -4027,21 +4046,33 @@ export async function handleCreateD365File(
     // When xmlContent or sourceCode contains `class MyClass` but finalObjectName is `MyPrefixMyClass`,
     // the file would be named MyPrefixMyClass.xml but contain `class MyClass` — inconsistency!
     if (finalObjectName !== args.objectName && (args.xmlContent || args.sourceCode)) {
-      // Pattern to match: `class OriginalName` or `public class OriginalName`
+      const orig = args.objectName;
+      const final = finalObjectName;
+      // Escape for use in RegExp (handles dots in extension names like "Foo.Extension")
+      const escapedOrig = orig.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      // 1. `class OriginalName` / `public class OriginalName` etc.
       const classPattern = new RegExp(
-        `\\b(public\\s+|private\\s+|protected\\s+|internal\\s+|final\\s+)?class\\s+${args.objectName}\\b`,
-        'g'
+        `\\b(public\\s+|private\\s+|protected\\s+|internal\\s+|final\\s+)?class\\s+${escapedOrig}\\b`,
+        'g',
       );
-      const replacedContent = xmlContent.replace(classPattern, (match) => {
-        return match.replace(args.objectName, finalObjectName);
-      });
-      
-      if (replacedContent !== xmlContent) {
+      let replaced = xmlContent.replace(classPattern, (match) => match.replace(orig, final));
+
+      // 2. classnum(OriginalName) — X++ intrinsic that refers to the class by name.
+      //    Callers often write classnum(OriginalName) in the source code before prefixing.
+      const classnumPattern = new RegExp(`\\bclassnum\\(\\s*${escapedOrig}\\s*\\)`, 'gi');
+      replaced = replaced.replace(classnumPattern, (m) => m.replace(new RegExp(escapedOrig, 'i'), final));
+
+      // 3. classStr(OriginalName) — used in [ExtensionOf(classStr(...))] and SysOperation attributes.
+      const classStrPattern = new RegExp(`\\bclassStr\\(\\s*${escapedOrig}\\s*\\)`, 'gi');
+      replaced = replaced.replace(classStrPattern, (m) => m.replace(new RegExp(escapedOrig, 'i'), final));
+
+      if (replaced !== xmlContent) {
         console.error(
           `[create_d365fo_file] ✅ Fixed class name inconsistency: ` +
-          `replaced \`class ${args.objectName}\` with \`class ${finalObjectName}\` in XML content`
+          `replaced \`${orig}\` with \`${final}\` in XML content (class decl, classnum, classStr)`,
         );
-        xmlContent = replacedContent;
+        xmlContent = replaced;
       }
     }
 
@@ -4142,6 +4173,10 @@ export async function handleCreateD365File(
     console.error(
       `[create_d365fo_file] ✅ Written: ${normalizedFullPath}  (${fileSizeKb} KB)`
     );
+
+    // Eagerly refresh the bridge provider so the new object is immediately
+    // resolvable by subsequent modify calls in the same session.
+    try { await bridgeRefreshProvider(context?.bridge); } catch { /* best-effort */ }
 
     // Post-write validation via C# bridge (best-effort, non-fatal, fire-and-forget).
     // Not awaited: the validation goes through the sequential bridge stdin/stdout

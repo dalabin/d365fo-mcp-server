@@ -62,6 +62,39 @@ export function clearDedupCache(): void {
   dedupCache.clear();
 }
 
+// ── In-flight dedup ──────────────────────────────────────────────────────────
+// When two identical calls arrive before the first one completes the cache has
+// nothing to serve yet. Track each in-progress call as a Promise so the second
+// call can coalesce onto the first rather than executing a redundant copy.
+
+interface InFlightEntry {
+  promise: Promise<any>;
+  resolve: (r: any) => void;
+  reject: (e: any) => void;
+}
+
+const inFlightCalls = new Map<string, InFlightEntry>();
+
+export function getInFlight(key: string): Promise<any> | undefined {
+  return inFlightCalls.get(key)?.promise;
+}
+
+export function registerInFlight(key: string): { resolve: (r: any) => void; reject: (e: any) => void } {
+  let resolve!: (r: any) => void;
+  let reject!: (e: any) => void;
+  const promise = new Promise<any>((res, rej) => { resolve = res; reject = rej; });
+  inFlightCalls.set(key, { promise, resolve, reject });
+  return { resolve, reject };
+}
+
+export function clearInFlight(key: string): void {
+  inFlightCalls.delete(key);
+}
+
+export function clearAllInFlight(): void {
+  inFlightCalls.clear();
+}
+
 /** Append a note to the first text item of a result (shallow clone). */
 export function appendNote(result: any, note: string): any {
   if (!result?.content?.length) return result;

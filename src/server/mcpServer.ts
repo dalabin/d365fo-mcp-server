@@ -11,13 +11,14 @@ import {
   ListRootsResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { registerToolHandler } from '../tools/toolHandler.js';
-import { registerClassResource } from '../resources/classResource.js';
-import { registerWorkspaceResources } from '../resources/workspaceResource.js';
+import { registerResources } from '../resources/index.js';
 import { registerCodeReviewPrompt } from '../prompts/codeReview.js';
 import type { XppServerContext } from '../types/context.js';
 import { SERVER_MODE, LOCAL_TOOLS, ALWAYS_TOOLS } from './serverMode.js';
 import { TOOL_ANNOTATIONS } from './toolAnnotations.js';
 import { getConfigManager } from '../utils/configManager.js';
+
+const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
 import { setLastRoots, recordRootsListChanged } from '../utils/stdioSessionInfo.js';
 import { OBJECT_INFO_TYPES, BATCH_INFO_TYPES } from '../tools/objectInfoRegistry.js';
 
@@ -59,16 +60,19 @@ function fileUriToPath(uri: string): string | null {
 function applyRootsToConfig(roots: Array<{ uri: string }>): void {
   if (!roots?.length) {
     // VS 2022 sends empty roots/list when closing a solution (transition state).
-    // Log this so it's visible in diagnostics, but keep the current detection
-    // result — the next roots/list_changed will bring the new solution path.
-    process.stderr.write('[mcpServer] roots/list received (0 root(s)) — solution closing or no workspace open\n');
+    // Keep the current detection result — the next roots/list_changed will update it.
+    if (DEBUG_LOGGING) {
+      process.stderr.write('[mcpServer] roots/list received (0 root(s)) — solution closing or no workspace open\n');
+    }
     setLastRoots([]);
     return;
   }
 
   // Log all received roots for diagnostics
-  process.stderr.write(`[mcpServer] roots/list received (${roots.length} root(s)):\n`);
-  roots.forEach((r, i) => process.stderr.write(`  [${i}] ${r.uri}\n`));
+  if (DEBUG_LOGGING) {
+    process.stderr.write(`[mcpServer] roots/list received (${roots.length} root(s)):\n`);
+    roots.forEach((r, i) => process.stderr.write(`  [${i}] ${r.uri}\n`));
+  }
 
   // Persist URIs in the stdio session singleton so get_workspace_info can display them.
   setLastRoots(roots.map(r => r.uri));
@@ -84,17 +88,19 @@ function applyRootsToConfig(roots: Array<{ uri: string }>): void {
   // After detection completes, log what solution/project was resolved so it's
   // easy to verify in the log that the correct project was picked.
   getConfigManager().setRuntimeContextFromRoots(paths).then(() => {
-    const { modelName, source, projectPath, solutionPath, workspacePath } =
-      getConfigManager().getDetectionSummary();
-    process.stderr.write(
-      `[mcpServer] ✅ Project detection result:\n` +
-      `   Model name  : ${modelName ?? '(unknown)'} (source: ${source})\n` +
-      `   Project path: ${projectPath  ?? '(not set)'}\n` +
-      `   Solution    : ${solutionPath ?? '(not set)'}\n` +
-      `   Workspace   : ${workspacePath ?? '(not set)'}\n`
-    );
+    if (DEBUG_LOGGING) {
+      const { modelName, source, projectPath, solutionPath, workspacePath } =
+        getConfigManager().getDetectionSummary();
+      process.stderr.write(
+        `[mcpServer] ✅ Project detection result:\n` +
+        `   Model name  : ${modelName ?? '(unknown)'} (source: ${source})\n` +
+        `   Project path: ${projectPath  ?? '(not set)'}\n` +
+        `   Solution    : ${solutionPath ?? '(not set)'}\n` +
+        `   Workspace   : ${workspacePath ?? '(not set)'}\n`
+      );
+    }
   }).catch(err => {
-    process.stderr.write(`[mcpServer] setRuntimeContextFromRoots error: ${err}\n`);
+    process.stderr.write(`[mcpServer] ⚠️ setRuntimeContextFromRoots error: ${err}\n`);
   });
 }
 
@@ -121,14 +127,18 @@ export function createXppMcpServer(context: XppServerContext): Server {
   // up-to-date on `notifications/roots/list_changed`.
   // -----------------------------------------------------------------------
   server.setNotificationHandler(InitializedNotificationSchema, async () => {
-    process.stderr.write(
-      `[mcpServer ${new Date().toISOString().slice(11, 23)}] ⚡ 'initialized' notification received — requesting roots/list\n`
-    );
+    if (DEBUG_LOGGING) {
+      process.stderr.write(
+        `[mcpServer ${new Date().toISOString().slice(11, 23)}] ⚡ 'initialized' notification received — requesting roots/list\n`
+      );
+    }
     // Only stdio clients (VS Code, VS 2022) advertise the roots capability.
     // HTTP / Azure clients do not — skipping the call avoids a -32001 timeout
     // that would otherwise be logged as a spurious warning in Azure Monitor.
     if (!server.getClientCapabilities()?.roots) {
-      process.stderr.write(`[mcpServer] ℹ️  Client has no roots capability — skipping roots/list\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Client has no roots capability — skipping roots/list\n`);
+      }
       return;
     }
     // HTTP transports (Azure App Service, MCP_FORCE_HTTP) are request-response only —
@@ -136,15 +146,16 @@ export function createXppMcpServer(context: XppServerContext): Server {
     // declares `roots` capability, calling roots/list would always time out (-32001).
     const isHttpMode = !!process.env.WEBSITES_PORT || process.env.MCP_FORCE_HTTP === 'true';
     if (isHttpMode) {
-      process.stderr.write(`[mcpServer] ℹ️  HTTP mode — skipping roots/list (transport is request-response only)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  HTTP mode — skipping roots/list (transport is request-response only)\n`);
+      }
       return;
     }
-    // Instanced mode: .mcp.json / env vars already provide both model name and
-    // workspace path — the workspace is fully known and immutable per instance.
-    // Skipping the call avoids a -32001 timeout when mcp-remote is the transport
-    // (hard-coded 60 s timeout, server-initiated requests cannot complete over HTTP).
+    // Instanced mode
     if (await getConfigManager().isStaticallyConfigured()) {
-      process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list (instanced mode)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list (instanced mode)\n`);
+      }
       return;
     }
     try {
@@ -162,9 +173,11 @@ export function createXppMcpServer(context: XppServerContext): Server {
 
   server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
     recordRootsListChanged();
-    process.stderr.write(
-      `[mcpServer ${new Date().toISOString().slice(11, 23)}] 🔄 'roots/list_changed' notification — re-requesting roots/list\n`
-    );
+    if (DEBUG_LOGGING) {
+      process.stderr.write(
+        `[mcpServer ${new Date().toISOString().slice(11, 23)}] 🔄 'roots/list_changed' notification — re-requesting roots/list\n`
+      );
+    }
     const isHttpMode = !!process.env.WEBSITES_PORT || process.env.MCP_FORCE_HTTP === 'true';
     if (!server.getClientCapabilities()?.roots || isHttpMode) {
       return;
@@ -172,7 +185,9 @@ export function createXppMcpServer(context: XppServerContext): Server {
     // Instanced mode: workspace is immutable per server instance — the
     // notification is irrelevant and the request would time out over mcp-remote.
     if (await getConfigManager().isStaticallyConfigured()) {
-      process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list on change (instanced mode)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list on change (instanced mode)\n`);
+      }
       return;
     }
     try {
@@ -187,9 +202,8 @@ export function createXppMcpServer(context: XppServerContext): Server {
   // Register centralized tool handler
   registerToolHandler(server, context);
 
-  // Register resources
-  registerClassResource(server, context);
-  registerWorkspaceResources(server, context);
+  // Register resources (single dispatcher — class + workspace schemes)
+  registerResources(server, context);
 
   // Register prompts (includes system instructions)
   registerCodeReviewPrompt(server, context);
@@ -463,7 +477,7 @@ export function createXppMcpServer(context: XppServerContext): Server {
               generateController: { type: 'boolean', description: '[scaffold:report] Generate Controller class (default: true).' },
               designStyle: { type: 'string', description: '[scaffold:report] RDL design pattern: "SimpleList" (default) or "GroupedWithTotals".' },
               copyFrom: { type: 'string', description: '[scaffold:table|form|report] Copy structure from existing object (table fields/indexes/relations; form datasources — prefer cloneFrom; report field structure).' },
-              fieldsHint: { type: 'string', description: '[scaffold:table|report] Comma-separated field names (e.g. "RecId, Name, Amount"). EDTs auto-suggested.' },
+              fieldsHint: { type: 'string', description: '[scaffold:table|report] Comma-separated field names (e.g. "RecId, Name, Amount"). EDTs auto-suggested from the indexed metadata. ⚠️ Custom EDTs/enums created in the SAME SESSION are not yet indexed — call update_symbol_index first, then scaffold, so the new EDTs are found and used. Without this step those fields will default to String255.' },
             },
             required: ['mode'],
           },
@@ -1054,8 +1068,8 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             properties: {
               action: {
                 type: 'string',
-                enum: ['search', 'info', 'create', 'update', 'rename', 'list-files'],
-                description: 'Label operation to perform. "list-files" is an alias of "info" (lists label files).',
+                enum: ['search', 'info', 'create', 'update', 'rename', 'list', 'list-files'],
+                description: 'Label operation to perform. "list"/"list-files" are aliases of "info" (lists label files).',
               },
               // ── shared filters ─────────────────────────────────────────────
               model: {
@@ -1221,7 +1235,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               domain: {
                 type: 'string',
                 enum: ['table', 'form'],
-                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action). Optional — inferred from the other params (action/pattern/xml/formName → form; tableGroup → table). Alias: patternType.',
+                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action). Optional — inferred from the other params (action/pattern/xml/formName → form; tableGroup → table). ⚠️ This is NOT a free-form "pattern type": a concept like "number-sequence"/"SysOperation" belongs to get_knowledge, not here.',
               },
               // ── domain=table ───────────────────────────────────────────────
               tableGroup: {
@@ -1479,13 +1493,15 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
       },
       {
         name: 'verify_d365fo_project',
-        description: 'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check d365fo_file(action="create") results.',
+        description:
+          'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check d365fo_file(action="create") results. ' +
+          'Omit `objects` to verify the ENTIRE project: every object referenced in the .rnrproj is checked on disk (requires projectPath, or an auto-detected/configured project).',
         inputSchema: {
           type: 'object',
           properties: {
             objects: {
               type: 'array',
-              description: 'List of objects to verify',
+              description: 'List of objects to verify. OPTIONAL — omit to verify every object referenced in the project (.rnrproj).',
               items: {
                 type: 'object',
                 properties: {
@@ -1514,19 +1530,20 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             packageName: { type: 'string', description: 'Package name. Auto-resolved from model name if omitted.' },
             packagePath: { type: 'string', description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory)' },
           },
-          required: ['objects'],
         },
       },
       // ── SDLC & Build Tools ────────────────────────────────────────────────────
       {
         name: 'update_symbol_index',
-        description: 'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. Call this after d365fo_file(action="create") to make the new object instantly searchable.',
+        description:
+          'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. ' +
+          'Call this after d365fo_file(action="create") — pass the created file\'s `filePath` — to make the new object instantly searchable AND, for new AxEnum/AxEdt files, resolvable by scaffolding (so enum fields become AxTableFieldEnum and EDT fields get the correct base type). ' +
+          'Call WITHOUT `filePath` for a lightweight refresh: it refreshes the C# bridge provider and drops workspace caches so objects created via the bridge this session become resolvable (does NOT fully index them into the symbol DB).',
         inputSchema: {
           type: 'object',
           properties: {
-            filePath: { type: 'string', description: 'Absolute path to the modified or created XML file (e.g. K:\\\\AosService\\\\PackagesLocalDirectory\\\\MyModel\\\\MyModel\\\\AxClass\\\\MyClass.xml)' },
+            filePath: { type: 'string', description: 'Absolute path to the modified or created XML file (e.g. K:\\\\AosService\\\\PackagesLocalDirectory\\\\MyModel\\\\MyModel\\\\AxClass\\\\MyClass.xml). Omit to run a lightweight bridge/workspace refresh instead of indexing a specific file.' },
           },
-          required: ['filePath'],
         },
       },
       {

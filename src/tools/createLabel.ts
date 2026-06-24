@@ -495,6 +495,20 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const issues = parsed.error.issues
         .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
         .join('; ');
+      // Common first-attempt mistake: passing the label *file* shape
+      // (labelFileId + a top-level `language`) instead of the label shape
+      // (labelId + translations[]). Call it out explicitly.
+      const raw = (request.params.arguments ?? {}) as Record<string, unknown>;
+      const wrongShape =
+        (raw.language !== undefined || raw.labelFileId !== undefined) &&
+        raw.labelId === undefined &&
+        raw.translations === undefined &&
+        raw.text === undefined && raw.value === undefined && raw.label === undefined;
+      const shapeHint = wrongShape
+        ? `\n\n⚠️ It looks like you passed \`language\`/\`labelFileId\` but no \`labelId\` or \`translations\`. ` +
+          `\`language\` is NOT a top-level create param — put each language inside \`translations\`. ` +
+          `\`labelFileId\` is the file that HOLDS the label; \`labelId\` is the label itself (both are required).`
+        : '';
       return {
         content: [{
           type: 'text',
@@ -502,7 +516,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
             `❌ labels(action="create"/"update"): invalid arguments — ${issues}.\n` +
             `Required: labelId, labelFileId, model, translations:[{language, text}]. Example:\n` +
             `  labels(action="create", labelId="EquipmentName", labelFileId="ContosoExt", model="ContosoExt", ` +
-            `translations=[{language:"en-US", text:"Equipment name"}])`,
+            `translations=[{language:"en-US", text:"Equipment name"}])` +
+            shapeHint,
         }],
         isError: true,
       };

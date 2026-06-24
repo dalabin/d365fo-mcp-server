@@ -115,6 +115,19 @@ export async function labelsTool(request: CallToolRequest, context: XppServerCon
   // can't accidentally clobber text via action="create".
   if (action === 'update') (rest as Record<string, unknown>).overwriteExisting = true;
 
+  // Param near-misses for search: the handler expects `query`, but agents commonly
+  // reach for searchText/text/q. Map them so the first call succeeds.
+  if (action === 'search') {
+    const r = rest as Record<string, unknown>;
+    if (r.query === undefined) {
+      const alt = r.searchText ?? r.text ?? r.q;
+      if (typeof alt === 'string') {
+        r.query = alt;
+        delete r.searchText; delete r.text; delete r.q;
+      }
+    }
+  }
+
   const subRequest: CallToolRequest = {
     method: 'tools/call',
     params: { name: dispatch.toolName, arguments: rest },

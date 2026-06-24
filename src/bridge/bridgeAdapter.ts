@@ -13,6 +13,7 @@
 
 import type { BridgeClient } from './bridgeClient.js';
 import * as debouncedRefresh from './debouncedRefresh.js';
+import { debugLog } from '../utils/logger.js';
 import type {
   BridgeTableInfo,
   BridgeClassInfo,
@@ -895,6 +896,12 @@ export async function bridgeValidateAfterWrite(
       if (result.valueCount != null && result.valueCount > 0) parts.push(`${result.valueCount} values`);
       return parts.join(' | ');
     } else {
+      // The bridge can't read back this object type yet — not an error (the file was
+      // already written). Skip silently rather than emitting a misleading warning.
+      if (typeof result.reason === 'string' && result.reason.startsWith('validation-unsupported')) {
+        debugLog(`[BridgeAdapter] validateAfterWrite: ${result.reason} (${objectName}) — skipped`);
+        return null;
+      }
       return `⚠️ **IMetadataProvider could not read back \`${objectName}\`**: ${result.reason ?? 'unknown error'}`;
     }
   } catch (e) {
@@ -1020,7 +1027,9 @@ export async function bridgeCreateObject(
       return { success: false, message: `Bridge createObject returned success=false` };
     }
   } catch (e) {
-    console.error(`[BridgeAdapter] createObject(${params.objectType}, ${params.objectName}) failed: ${e}`);
+    // Recoverable: the caller falls back to XML generation on null. Log at debug
+    // so an expected fast-path miss doesn't surface as a client-facing error.
+    debugLog(`[BridgeAdapter] createObject(${params.objectType}, ${params.objectName}) failed — falling back to XML generation: ${e}`);
     return null; // Signal to caller: fall back to XML generation
   }
 }
@@ -1058,7 +1067,9 @@ export async function bridgeCreateSmartTable(
       return null;
     }
   } catch (e) {
-    console.error(`[BridgeAdapter] createSmartTable(${params.objectName}) failed: ${e}`);
+    // Recoverable: the caller falls back to SmartXmlBuilder on null. Log at debug
+    // so an expected fast-path miss doesn't surface as a client-facing error.
+    debugLog(`[BridgeAdapter] createSmartTable(${params.objectName}) failed — falling back to SmartXmlBuilder: ${e}`);
     return null; // Signal to caller: fall back to SmartXmlBuilder
   }
 }
@@ -1086,7 +1097,7 @@ export async function bridgeAddMethod(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addMethod(${objectType}, ${objectName}, ${methodName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1141,7 +1152,7 @@ export async function bridgeSetProperty(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] setProperty(${objectType}, ${objectName}, ${propertyPath}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1169,7 +1180,7 @@ export async function bridgeReplaceCode(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] replaceCode(${objectType}, ${objectName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1195,7 +1206,7 @@ export async function bridgeRemoveMethod(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] removeMethod(${objectType}, ${objectName}, ${methodName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1221,7 +1232,7 @@ export async function bridgeAddIndex(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addIndex(${tableName}, ${indexName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1244,7 +1255,7 @@ export async function bridgeRemoveIndex(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] removeIndex(${tableName}, ${indexName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1269,7 +1280,7 @@ export async function bridgeAddRelation(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addRelation(${tableName}, ${relationName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1292,7 +1303,7 @@ export async function bridgeRemoveRelation(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] removeRelation(${tableName}, ${relationName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1317,7 +1328,7 @@ export async function bridgeAddFieldGroup(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addFieldGroup(${tableName}, ${groupName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1340,7 +1351,7 @@ export async function bridgeRemoveFieldGroup(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] removeFieldGroup(${tableName}, ${groupName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1364,7 +1375,7 @@ export async function bridgeAddFieldToFieldGroup(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addFieldToFieldGroup(${tableName}, ${groupName}, ${fieldName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1484,7 +1495,7 @@ export async function bridgeAddEnumValue(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addEnumValue(${enumName}, ${valueName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1508,7 +1519,7 @@ export async function bridgeModifyEnumValue(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] modifyEnumValue(${enumName}, ${valueName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1531,7 +1542,7 @@ export async function bridgeRemoveEnumValue(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] removeEnumValue(${enumName}, ${valueName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1559,7 +1570,7 @@ export async function bridgeAddControl(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addControl(${formName}, ${controlName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1586,7 +1597,7 @@ export async function bridgeAddDataSource(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addDataSource(${objectType}, ${objectName}, ${dsName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1649,7 +1660,7 @@ export async function bridgeAddFieldModification(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addFieldModification(${extensionName}, ${fieldName}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 
@@ -1678,7 +1689,7 @@ export async function bridgeAddMenuItemToMenu(
     };
   } catch (e) {
     console.error(`[BridgeAdapter] addMenuItemToMenu(${menuName}, ${menuItemToAdd}) failed: ${e}`);
-    return null;
+    return { success: false, message: String(e) };
   }
 }
 

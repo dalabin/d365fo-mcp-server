@@ -11,6 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { autoDetectD365Project, detectD365Project, scanAllD365Projects, extractModelNameFromProject, detectGitBranch, isMicrosoftDemoModel, type D365ProjectInfo } from './workspaceDetector.js';
 import { registerCustomModel, getCustomModels } from './modelClassifier.js';
 import { XppConfigProvider, type XppEnvironmentConfig } from './xppConfigProvider.js';
+import { debugLog } from './logger.js';
 
 export interface McpContext {
   workspacePath?: string;
@@ -105,27 +106,29 @@ class ConfigManager {
     const solutionsRoot = process.env.D365FO_SOLUTIONS_PATH;
     if (!solutionsRoot || this.allDetectedProjectsReady) return;
 
-    console.error(`[ConfigManager] 🔍 Eager project scan starting: ${solutionsRoot}`);
+    debugLog(`[ConfigManager] 🔍 Eager project scan starting: ${solutionsRoot}`);
     this.allDetectedProjectsReady = (async () => {
       try {
         const all = await scanAllD365Projects(solutionsRoot);
         if (all.length > 0) {
           this.allDetectedProjects = all;
-          // Compact summary: group by model, then list counts + first project path per model
+          // Compact summary: group by model, then list counts + first project path per model.
+          // Operational/info only — gated behind DEBUG_LOGGING so it doesn't surface as
+          // dozens of "[server stderr]" warnings in the MCP client on every startup.
           const byModel = new Map<string, string[]>();
           for (const p of all) {
             const list = byModel.get(p.modelName) ?? [];
             if (p.projectPath) list.push(p.projectPath);
             byModel.set(p.modelName, list);
           }
-          console.error(
+          debugLog(
             `[ConfigManager] 🔍 Eager scan complete: ${all.length} project(s) across ${byModel.size} model(s)`
           );
           for (const [model, paths] of byModel) {
-            console.error(`   ${model}: ${paths.length} project(s)  (first: ${paths[0]})`);
+            debugLog(`   ${model}: ${paths.length} project(s)  (first: ${paths[0]})`);
           }
         } else {
-          console.error(`[ConfigManager] 🔍 Eager scan: no projects found under ${solutionsRoot}`);
+          debugLog(`[ConfigManager] 🔍 Eager scan: no projects found under ${solutionsRoot}`);
         }
       } catch (err) {
         console.error(`[ConfigManager] 🔍 Eager scan failed:`, err);
@@ -200,7 +203,11 @@ class ConfigManager {
     // discard this (now stale) result so we never overwrite a more recent correct answer.
     const isStale = generation !== undefined && generation < this.detectionGeneration;
     if (isStale) {
-      console.error(`[ConfigManager] ⚠️ Stale workspace detection (gen ${generation} < current ${this.detectionGeneration}) — skipping project assignment`);
+      // Benign race-guard: a newer detection (e.g. roots/list arriving after the
+      // initial workspace seed) superseded this one, so we discard the stale result.
+      // Expected during normal startup — gated behind DEBUG_LOGGING so it doesn't
+      // surface as a client-facing warning.
+      debugLog(`[ConfigManager] ⚠️ Stale workspace detection (gen ${generation} < current ${this.detectionGeneration}) — skipping project assignment`);
       // Do NOT return early: D365FO_SOLUTIONS_PATH scan below must still run so
       // that allDetectedProjects is populated for future matchProjectForWorkspace calls.
     } else if (detectedProject) {

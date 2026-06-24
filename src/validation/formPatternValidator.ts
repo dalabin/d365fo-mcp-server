@@ -191,12 +191,27 @@ function matchChildren(
 
     if (indices.length === 0) {
       if (spec.occurrence === 'required' || spec.occurrence === 'oneOrMore') {
+        const basefix = `Add a ${spec.controlTypes[0]} control${spec.nameHint ? ` (conventionally named ${spec.nameHint})` : ''} under ${parentPath}.`;
+        const qfSnippet = spec.controlTypes[0] === 'QuickFilterControl'
+          ? '\nQuickFilterControl requires a specific XML structure (NO i:type attribute, NOT <ExtensionName>):\n' +
+            '<AxFormControl>\n' +
+            '  <Name>QuickFilterControl</Name>\n' +
+            '  <FormControlExtension>\n' +
+            '    <Name>QuickFilterControl</Name>\n' +
+            '    <ExtensionComponents />\n' +
+            '    <ExtensionProperties>\n' +
+            '      <AxFormControlExtensionProperty><Name>targetControlName</Name><Type>String</Type><Value>Grid</Value></AxFormControlExtensionProperty>\n' +
+            '      <AxFormControlExtensionProperty><Name>defaultColumnName</Name><Type>String</Type><Value>ColumnName</Value></AxFormControlExtensionProperty>\n' +
+            '    </ExtensionProperties>\n' +
+            '  </FormControlExtension>\n' +
+            '</AxFormControl>'
+          : '';
         violations.push({
           rule: 'FP003',
           severity: 'error',
           path: parentPath,
           excerpt: `${patternLabel}: required ${spec.controlTypes.join('/')} ("${spec.id}") is missing`,
-          fix: `Add a ${spec.controlTypes[0]} control${spec.nameHint ? ` (conventionally named ${spec.nameHint})` : ''} under ${parentPath}.`,
+          fix: basefix + qfSnippet,
         });
       }
       continue;

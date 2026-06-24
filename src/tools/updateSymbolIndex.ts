@@ -85,6 +85,40 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
   const { filePath } = params;
   try {
     const { symbolIndex } = context;
+
+    // ── REFRESH MODE: no filePath ───────────────────────────────────────────
+    // Pick up objects created this session that the caller can't point a file at
+    // (e.g. bridge createObject results) by refreshing the C# bridge provider and
+    // dropping workspace caches. Lighter than a full reindex; per-object SQLite
+    // indexing still needs an explicit filePath.
+    if (!filePath || (typeof filePath === 'string' && filePath.trim().length === 0)) {
+      context.workspaceScanner?.invalidate?.();
+      let bridgeNote = 'Bridge provider not available (skipped).';
+      try {
+        const refreshResult = await bridgeRefreshProvider(context.bridge);
+        if (refreshResult) {
+          bridgeNote = `Bridge provider refreshed in ${refreshResult.elapsedMs}ms — newly created objects are now resolvable by bridge-backed operations.`;
+        }
+      } catch (e: any) {
+        bridgeNote = `Bridge refresh skipped: ${e?.message ?? e}`;
+      }
+      symbolIndex.touchLastIndexed?.();
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `🔄 **Index refresh** (no filePath supplied).\n\n` +
+            `${bridgeNote}\n` +
+            `Workspace scan cache invalidated.\n\n` +
+            `ℹ️ To fully index a specific new object into the searchable symbol DB (so scaffolding ` +
+            `resolves its EDTs/enums and references work), call this tool again with \`filePath\` ` +
+            `pointing at the created \`.xml\` (e.g. the new AxEnum/AxEdt/AxTable file).`,
+        }],
+      };
+    }
+    // A file just changed on disk — drop the workspace scan cache so the
+    // context pipeline (recently-edited / active object) reflects it at once.
+    context.workspaceScanner?.invalidate?.();
     const pathParts = filePath.split(/[\\/]/);
     const fileName = pathParts[pathParts.length - 1] ?? filePath;
     const objectName = fileName.replace(/\.[^.]+$/, '');
@@ -279,14 +313,43 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       const result = await parser.parseEdtFile(filePath, model);
       if (result.success && result.data) {
         const edtData = result.data as any;
+        const edtName = edtData.name ?? objectName;
         symbolIndex.addSymbol({
-          name: edtData.name ?? objectName,
+          name: edtName,
           type: 'edt',
           signature: edtData.extends ?? undefined,
           filePath,
           model,
         });
         insertedCount++;
+        // Also populate edt_metadata so scaffolding (resolveEdtBaseType / resolveBestEdt)
+        // can resolve this EDT's base type and relation. The single-file indexer
+        // previously skipped this table, so a same-session EDT never resolved its base
+        // type and its fields defaulted to AxTableFieldString.
+        try {
+          symbolIndex.db
+            .prepare(`DELETE FROM edt_metadata WHERE edt_name = ? AND model = ?`)
+            .run(edtName, model);
+          symbolIndex.db.prepare(`
+            INSERT OR REPLACE INTO edt_metadata (
+              edt_name, extends, enum_type, reference_table, relation_type,
+              string_size, database_string_size, display_length, label, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            edtName,
+            edtData.extends ?? null,
+            edtData.enumType ?? null,
+            edtData.referenceTable ?? null,
+            edtData.relationType ?? null,
+            edtData.stringSize ?? null,
+            edtData.databaseStringSize ?? null,
+            edtData.displayLength ?? null,
+            edtData.label ?? null,
+            model,
+          );
+        } catch (e) {
+          console.error(`[update_symbol_index] edt_metadata upsert skipped for ${edtName}: ${e}`);
+        }
       } else {
         tx();
       }

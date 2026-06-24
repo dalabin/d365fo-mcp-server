@@ -265,6 +265,37 @@ export async function getFormPatternSpecTool(
     ...FORM_PATTERN_CATALOG.patterns.map((p) => p.xmlName),
     ...FORM_PATTERN_CATALOG.subPatterns.map((p) => p.xmlName),
   ];
+
+  // Detect common knowledge topics that look like pattern names so the model
+  // gets an actionable redirect instead of a generic unknown-pattern list.
+  const KNOWLEDGE_TOPIC_REDIRECTS: Record<string, string> = {
+    'number-sequence':   'number-sequences',
+    'number-sequences':  'number-sequences',
+    'numbersequence':    'number-sequences',
+    'security':          'security',
+    'security-access':   'security',
+    'coc':               'coc-authoring',
+    'coc-authoring':     'coc-authoring',
+    'sysoperation':      'sysoperation',
+    'data-entity':       'data-entities',
+    'data-entities':     'data-entities',
+    'workflow':          'workflow',
+    'select-statement':  'select-statement',
+  };
+  const knowledgeTopic = KNOWLEDGE_TOPIC_REDIRECTS[name.toLowerCase()];
+  if (knowledgeTopic) {
+    return {
+      isError: true,
+      content: [{
+        type: 'text',
+        text:
+          `❌ "${name}" is not a form pattern — it is a knowledge topic.\n\n` +
+          `Use get_knowledge instead:\n` +
+          `  get_knowledge(kind="knowledge", topic="${knowledgeTopic}")`,
+      }],
+    };
+  }
+
   return {
     isError: true,
     content: [{

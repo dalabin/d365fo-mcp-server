@@ -87,19 +87,38 @@ const DS_VALIDATE_WRITE: MethodStub = {
         }`,
 };
 
+/** Lines datasource initValue that defaults the foreign key from the header record. */
+const LINES_INIT_VALUE = (headerDsName: string): MethodStub => ({
+  name: 'initValue',
+  source: `        public void initValue()
+        {
+            super();
+
+            // TODO: default line fields from the header record, e.g.:
+            // this.cursor().HeaderRecId = ${headerDsName || 'Header'}.RecId;
+        }`,
+});
+
 // ── Per-pattern selection ────────────────────────────────────────────────────
 
 export interface PatternMethodStubs {
   formMethods: MethodStub[];
   /** Stubs for the PRIMARY datasource */
   dataSourceMethods: MethodStub[];
+  /** Stubs for the LINES datasource (header+lines patterns) */
+  linesDataSourceMethods?: MethodStub[];
 }
 
 /**
  * Lifecycle stubs appropriate for a pattern. `dsName` is the primary
- * datasource name (used inside stub bodies for examples).
+ * datasource name; `linesDsName` (optional) the lines datasource for
+ * header+lines patterns (used to default line fields from the header).
  */
-export function methodStubsForPattern(patternName: string, dsName: string): PatternMethodStubs {
+export function methodStubsForPattern(
+  patternName: string,
+  dsName: string,
+  linesDsName?: string,
+): PatternMethodStubs {
   const spec = resolvePattern(patternName);
   const id = spec?.id ?? 'SimpleList';
 
@@ -124,7 +143,12 @@ export function methodStubsForPattern(patternName: string, dsName: string): Patt
     case 'DetailsTransaction':
       return {
         formMethods: [FORM_INIT],
-        dataSourceMethods: [DS_ACTIVE, DS_INIT_VALUE, DS_VALIDATE_WRITE],
+        // Header datasource drives selection + save-time validation.
+        dataSourceMethods: [DS_ACTIVE, DS_VALIDATE_WRITE],
+        // Lines datasource defaults new-line fields from the header.
+        linesDataSourceMethods: linesDsName
+          ? [LINES_INIT_VALUE(dsName), DS_VALIDATE_WRITE]
+          : undefined,
       };
     case 'SimpleListDetails':
       return {
@@ -169,9 +193,29 @@ export function injectMethodStubs(
   xml: string,
   stubs: PatternMethodStubs,
   dsName: string,
+  linesDsName?: string,
 ): { xml: string; injected: string[] } {
   let result = xml;
   const injected: string[] = [];
+
+  // Insert a <Methods> block right after a datasource's <Name>. Returns the
+  // updated XML (or the original when the datasource/methods aren't found).
+  const injectDsMethods = (src: string, targetDs: string, methods: MethodStub[]): string => {
+    if (methods.length === 0 || !targetDs) return src;
+    // Search from the real <DataSources> region so a same-named SourceCode method
+    // can't be mistaken for the datasource's <Name>.
+    const dsRegion = src.indexOf('<AxFormDataSource');
+    const nameTag = `<Name>${targetDs}</Name>`;
+    const nameIdx = src.indexOf(nameTag, dsRegion === -1 ? 0 : dsRegion);
+    if (nameIdx === -1) return src;
+    const insertAt = nameIdx + nameTag.length;
+    const block =
+      `\n\t\t\t<Methods>\n` +
+      methods.map((s) => methodXml(s, '\t\t\t\t')).join('') +
+      `\t\t\t</Methods>`;
+    injected.push(...methods.map((s) => `${targetDs}.${s.name}`));
+    return src.slice(0, insertAt) + block + src.slice(insertAt);
+  };
 
   if (stubs.formMethods.length > 0) {
     // classDeclaration method block ends at the first </Method> after its <Name>
@@ -187,20 +231,9 @@ export function injectMethodStubs(
     }
   }
 
-  if (stubs.dataSourceMethods.length > 0 && dsName) {
-    // Primary datasource: first <AxFormDataSource …><Name>dsName</Name>
-    const dsOpen = result.indexOf('<AxFormDataSource');
-    const nameTag = `<Name>${dsName}</Name>`;
-    const nameIdx = dsOpen === -1 ? -1 : result.indexOf(nameTag, dsOpen);
-    if (nameIdx !== -1) {
-      const insertAt = nameIdx + nameTag.length;
-      const methodsBlock =
-        `\n\t\t\t<Methods>\n` +
-        stubs.dataSourceMethods.map((s) => methodXml(s, '\t\t\t\t')).join('') +
-        `\t\t\t</Methods>`;
-      result = result.slice(0, insertAt) + methodsBlock + result.slice(insertAt);
-      injected.push(...stubs.dataSourceMethods.map((s) => `${dsName}.${s.name}`));
-    }
+  result = injectDsMethods(result, dsName, stubs.dataSourceMethods);
+  if (stubs.linesDataSourceMethods && linesDsName) {
+    result = injectDsMethods(result, linesDsName, stubs.linesDataSourceMethods);
   }
 
   return { xml: result, injected };

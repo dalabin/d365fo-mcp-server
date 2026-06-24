@@ -6,6 +6,7 @@
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import * as path from 'path';
+import { debugLog } from './logger.js';
 
 export interface D365ProjectInfo {
   /** Path to the .rnrproj file. May be undefined when model was detected from PackagesLocalDirectory path. */
@@ -117,18 +118,18 @@ export async function extractModelNameFromProject(projectPath: string): Promise<
  */
 export async function detectD365Project(workspacePath: string, maxDepth: number = 5): Promise<D365ProjectInfo | null> {
   try {
-    console.error(`[WorkspaceDetector] Searching for .rnrproj files in: ${workspacePath}`);
+    debugLog(`[WorkspaceDetector] Searching for .rnrproj files in: ${workspacePath}`);
 
     // Find all .rnrproj files in workspace
     const projectFiles = await findProjectFiles(workspacePath, maxDepth);
 
     if (projectFiles.length === 0) {
-      console.error('[WorkspaceDetector] No .rnrproj files found in workspace');
+      debugLog('[WorkspaceDetector] No .rnrproj files found in workspace');
       return null;
     }
 
-    console.error(`[WorkspaceDetector] Found ${projectFiles.length} .rnrproj file(s):`);
-    projectFiles.forEach(p => console.error(`   - ${p}`));
+    debugLog(`[WorkspaceDetector] Found ${projectFiles.length} .rnrproj file(s):`);
+    projectFiles.forEach(p => debugLog(`   - ${p}`));
 
     // D365FO convention: in a multi-project solution folder the "primary" project
     // usually has the SAME NAME as the solution folder (workspace base name).
@@ -143,7 +144,7 @@ export async function detectD365Project(workspacePath: string, maxDepth: number 
       );
       if (nameMatch) {
         primaryProject = nameMatch;
-        console.error(`[WorkspaceDetector] Solution-name match → ${path.basename(nameMatch)}`);
+        debugLog(`[WorkspaceDetector] Solution-name match → ${path.basename(nameMatch)}`);
       }
     }
 
@@ -152,12 +153,12 @@ export async function detectD365Project(workspacePath: string, maxDepth: number 
     // (e.g. FleetManagement — the VS new-project wizard default).
     const modelName = await extractModelNameFromProject(primaryProject);
     if (modelName && isMicrosoftDemoModel(modelName) && projectFiles.length > 1) {
-      console.error(`[WorkspaceDetector] Primary .rnrproj has MS demo model "${modelName}" — looking for better candidate`);
+      debugLog(`[WorkspaceDetector] Primary .rnrproj has MS demo model "${modelName}" — looking for better candidate`);
       for (const pf of projectFiles) {
         if (pf === primaryProject) continue;
         const altModel = await extractModelNameFromProject(pf);
         if (altModel && !isMicrosoftDemoModel(altModel)) {
-          console.error(`[WorkspaceDetector] Skipping demo model "${modelName}", using "${altModel}" from ${path.basename(pf)}`);
+          debugLog(`[WorkspaceDetector] Skipping demo model "${modelName}", using "${altModel}" from ${path.basename(pf)}`);
           primaryProject = pf;
           break;
         }
@@ -178,10 +179,10 @@ export async function detectD365Project(workspacePath: string, maxDepth: number 
       solutionPath,
     };
 
-    console.error('[WorkspaceDetector] ✅ Detected D365FO project:');
-    console.error(`   Project: ${result.projectPath}`);
-    console.error(`   Model: ${result.modelName}`);
-    console.error(`   Solution: ${result.solutionPath}`);
+    debugLog('[WorkspaceDetector] ✅ Detected D365FO project:');
+    debugLog(`   Project: ${result.projectPath}`);
+    debugLog(`   Model: ${result.modelName}`);
+    debugLog(`   Solution: ${result.solutionPath}`);
 
     return result;
   } catch (error) {
@@ -203,7 +204,7 @@ export async function autoDetectD365Project(
 ): Promise<D365ProjectInfo | null> {
   // Priority 1: Explicit workspace path
   if (explicitWorkspacePath) {
-    console.error(`[WorkspaceDetector] Using explicit workspace path: ${explicitWorkspacePath}`);
+    debugLog(`[WorkspaceDetector] Using explicit workspace path: ${explicitWorkspacePath}`);
     const result = await detectD365Project(explicitWorkspacePath);
     if (result) return result;
   }
@@ -214,9 +215,9 @@ export async function autoDetectD365Project(
   const cwd = process.cwd();
   const cwdIsNodeProject = existsSync(path.join(cwd, 'package.json'));
   if (cwdIsNodeProject) {
-    console.error(`[WorkspaceDetector] Skipping cwd (Node.js project): ${cwd}`);
+    debugLog(`[WorkspaceDetector] Skipping cwd (Node.js project): ${cwd}`);
   } else {
-    console.error(`[WorkspaceDetector] Trying current working directory: ${cwd}`);
+    debugLog(`[WorkspaceDetector] Trying current working directory: ${cwd}`);
     const cwdResult = await detectD365Project(cwd);
     if (cwdResult) return cwdResult;
   }
@@ -224,7 +225,7 @@ export async function autoDetectD365Project(
   // Priority 3: Explicit env vars
   const envWorkspace = process.env.WORKSPACE_PATH;
   if (envWorkspace) {
-    console.error(`[WorkspaceDetector] Trying WORKSPACE_PATH env var: ${envWorkspace}`);
+    debugLog(`[WorkspaceDetector] Trying WORKSPACE_PATH env var: ${envWorkspace}`);
     const envResult = await detectD365Project(envWorkspace);
     if (envResult) return envResult;
   }
@@ -234,7 +235,7 @@ export async function autoDetectD365Project(
   // All found projects are also returned via scanAllD365Projects() for listing in get_workspace_info.
   const solutionsRoot = process.env.D365FO_SOLUTIONS_PATH;
   if (solutionsRoot) {
-    console.error(`[WorkspaceDetector] Scanning D365FO_SOLUTIONS_PATH: ${solutionsRoot}`);
+    debugLog(`[WorkspaceDetector] Scanning D365FO_SOLUTIONS_PATH: ${solutionsRoot}`);
     const result = await detectD365Project(solutionsRoot, 6);
     if (result) return result;
   }
@@ -265,7 +266,7 @@ export async function autoDetectD365Project(
         const files = await findProjectFiles(searchRoot);
         if (files.length > 0) {
           const loggedSearchRoot = sanitizePathForLog(searchRoot);
-          console.error(`[WorkspaceDetector] Found ${files.length} .rnrproj file(s) in ${loggedSearchRoot}`);
+          debugLog(`[WorkspaceDetector] Found ${files.length} .rnrproj file(s) in ${loggedSearchRoot}`);
           const projectPath = files[0]; // take first (most likely the user's project)
           const modelName = await extractModelNameFromProject(projectPath);
           if (modelName) {
@@ -273,8 +274,8 @@ export async function autoDetectD365Project(
             const packagePath = explicitWorkspacePath
               ? path.normalize(explicitWorkspacePath).match(/^(.+[\\\/]PackagesLocalDirectory)(?:[\\\/]|$)/i)?.[1] || null
               : null;
-            console.error(`[WorkspaceDetector] ✅ Found project via well-known path: ${projectPath}`);
-            console.error(`[WorkspaceDetector]    ModelName: ${modelName}`);
+            debugLog(`[WorkspaceDetector] ✅ Found project via well-known path: ${projectPath}`);
+            debugLog(`[WorkspaceDetector]    ModelName: ${modelName}`);
             return {
               modelName,
               projectPath,
@@ -313,9 +314,9 @@ export async function autoDetectD365Project(
     if (match) {
       const packagePath = match[1];
       const modelName = match[2];
-      console.error(`[WorkspaceDetector] ✅ Extracted model name from PackagesLocalDirectory path: ${modelName}`);
-      console.error(`[WorkspaceDetector]    Package path: ${packagePath}`);
-      console.error(`[WorkspaceDetector]    Note: projectPath unknown — addToProject=true requires projectPath in .mcp.json`);
+      debugLog(`[WorkspaceDetector] ✅ Extracted model name from PackagesLocalDirectory path: ${modelName}`);
+      debugLog(`[WorkspaceDetector]    Package path: ${packagePath}`);
+      debugLog(`[WorkspaceDetector]    Note: projectPath unknown — addToProject=true requires projectPath in .mcp.json`);
       return {
         modelName,
         packagePath,

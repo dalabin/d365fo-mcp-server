@@ -987,29 +987,32 @@ function numberSeqHandlerTemplate(name: string): string {
 //     numSeqFormHandler.formMethodDataSourceDelete();
 // }
 
-// ── Step 4: NumberSeqApplicationModule extension (loadModule CoC) ────────
+// ── Step 4: NumberSeqApplicationModule subclass (the module class) ────────
 /// <summary>
-/// Extends NumberSeqApplicationModule to register the ${name}Id number sequence reference.
-/// Apply CoC on NumberSeqApplicationModule.loadModule() in your model.
+/// Subclass of NumberSeqApplicationModule that registers the ${name}Id number sequence.
+/// Add a NumberSeqModule enum value for ${name} and register this class via an event
+/// handler on NumberSeqGlobal.initModules() so loadModule() is called at startup.
 /// </summary>
-[ExtensionOf(classStr(NumberSeqApplicationModule${name}))]
-final class NumberSeqApplicationModule${name}_Extension
+public class NumberSeqModule${name} extends NumberSeqApplicationModule
 {
-    public void loadModule()
+    protected void loadModule()
     {
-        next loadModule();
+        NumberSeqDatatype datatype = NumberSeqDatatype::construct();
+        datatype.parmDatatypeId(extendedTypeNum(${name}Id));
+        datatype.parmReferenceHelp(literalStr("${name} identifier"));
+        datatype.parmWizardIsContinuous(false);
+        datatype.parmWizardIsManual(NoYes::No);
+        datatype.parmWizardIsChangeDownAllowed(NoYes::Yes);
+        datatype.parmWizardIsChangeUpAllowed(NoYes::Yes);
+        datatype.parmWizardHighest(0);
+        datatype.parmSortField(1);
+        datatype.addParameterType(NumberSeqParameterType::DataArea, true, false);
+        this.create(datatype);
+    }
 
-        // Add number sequence scope for ${name}Id
-        NumberSeqScopeFactory scopeFactory;
-        NumberSeqScope        scope = NumberSeqScopeFactory::createDataAreaScope();
-
-        NumberSeqReference numSeqRef;
-        numSeqRef.AllowManual         = NoYes::Yes;
-        numSeqRef.Continuous          = NoYes::No;
-        numSeqRef.DataTypeId          = extendedTypeNum(${name}Id);
-        numSeqRef.NumberSequenceModule = extendedTypeNum(${name}Id); // use your module enum
-
-        this.addModuleEntry(numSeqRef, scope, true, "${name} identifier");
+    public NumberSeqModule numberSeqModule()
+    {
+        return NumberSeqModule::${name};
     }
 }
 

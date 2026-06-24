@@ -23,8 +23,14 @@ vi.mock('../../src/tools/codeGen', () => ({ codeGenTool: vi.fn((_r: any) => ({ c
 vi.mock('../../src/tools/generateSmart', () => ({ generateSmartTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'scaffold' }] })) }));
 vi.mock('../../src/tools/getTablePatterns', () => ({ getTablePatternsTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'table' }] })) }));
 vi.mock('../../src/tools/formPattern', () => ({ formPatternTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'form' }] })) }));
+vi.mock('../../src/tools/analyzePatterns', () => ({ analyzeCodePatternsTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'patterns' }] })) }));
+vi.mock('../../src/tools/suggestImplementation', () => ({ suggestMethodImplementationTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'impl' }] })) }));
+vi.mock('../../src/tools/analyzeCompleteness', () => ({ analyzeClassCompletenessTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'complete' }] })) }));
+vi.mock('../../src/tools/apiUsagePatterns', () => ({ getApiUsagePatternsTool: vi.fn((_r: any) => ({ content: [{ type: 'text', text: 'api' }] })) }));
 
 import { extensionInfoTool } from '../../src/tools/extensionInfo';
+import { analyzeCodeTool } from '../../src/tools/analyzeCode';
+import { getApiUsagePatternsTool } from '../../src/tools/apiUsagePatterns';
 import { validateCodeTool } from '../../src/tools/validateCode';
 import { generateObjectTool } from '../../src/tools/generateObject';
 import { objectPatternsTool } from '../../src/tools/objectPatterns';
@@ -203,8 +209,42 @@ describe('object_patterns dispatcher', () => {
     expect(formPatternTool).toHaveBeenCalledOnce();
   });
 
+  it('a real form-pattern NAME in patternType → form + action=spec + pattern', async () => {
+    await objectPatternsTool(req('object_patterns', { patternType: 'SimpleList' }), ctx);
+    expect(formPatternTool).toHaveBeenCalledOnce();
+    expect(getTablePatternsTool).not.toHaveBeenCalled();
+    expect(argsOf(formPatternTool)).toMatchObject({ domain: 'form', action: 'spec', pattern: 'SimpleList' });
+  });
+
+  it('a real form-pattern NAME in objectType (canonicalised) → form spec', async () => {
+    await objectPatternsTool(req('object_patterns', { objectType: 'detailsmaster' }), ctx);
+    expect(argsOf(formPatternTool)).toMatchObject({ domain: 'form', action: 'spec', pattern: 'DetailsMaster' });
+  });
+
+  it('a concept noun (number-sequence) in patternType → friendly error, no handler, redirects to get_knowledge', async () => {
+    const r: any = await objectPatternsTool(req('object_patterns', { patternType: 'number-sequence' }), ctx);
+    expect(r.isError).toBe(true);
+    expect(formPatternTool).not.toHaveBeenCalled();
+    expect(getTablePatternsTool).not.toHaveBeenCalled();
+    expect(r.content[0].text).toContain('get_knowledge');
+  });
+
   it('unknown/omitted domain with no signals → friendly error', async () => {
     const r: any = await objectPatternsTool(req('object_patterns', {}), ctx);
     expect(r.isError).toBe(true);
+  });
+});
+
+// ── analyze_code ──────────────────────────────────────────────────────────────
+describe('analyze_code dispatcher', () => {
+  it('routes api-usage and maps className → apiName', async () => {
+    await analyzeCodeTool(req('analyze_code', { mode: 'api-usage', className: 'NumberSeqFormHandler' }), ctx);
+    expect(getApiUsagePatternsTool).toHaveBeenCalledOnce();
+    expect(argsOf(getApiUsagePatternsTool).apiName).toBe('NumberSeqFormHandler');
+  });
+
+  it('does not override an explicit apiName', async () => {
+    await analyzeCodeTool(req('analyze_code', { mode: 'api-usage', apiName: 'NumberSeq', className: 'X' }), ctx);
+    expect(argsOf(getApiUsagePatternsTool).apiName).toBe('NumberSeq');
   });
 });

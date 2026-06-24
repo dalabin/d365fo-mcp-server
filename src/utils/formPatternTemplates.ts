@@ -14,6 +14,8 @@
  *   Lookup            → SysLanguageLookup.xml (ApplicationPlatform)
  */
 
+import { type FieldControlMap, controlForField } from './fieldControlTypes.js';
+
 export interface FormTemplateOptions {
   /** Form name (also used for classDeclaration) */
   formName: string;
@@ -31,6 +33,16 @@ export interface FormTemplateOptions {
   linesDsName?: string;
   /** Lines datasource table name for DetailsTransaction */
   linesDsTable?: string;
+  /** Field names to show in the lines grid (DetailsTransaction) */
+  linesFields?: string[];
+  /**
+   * Field → control-type map for the primary table. When provided, field
+   * controls render with the correct type (ComboBox for enums, Date for dates,
+   * …) instead of defaulting every field to a string control.
+   */
+  fieldTypes?: FieldControlMap;
+  /** Field → control-type map for the lines table (DetailsTransaction). */
+  linesFieldTypes?: FieldControlMap;
 }
 
 /** Supported top-level D365FO form patterns */
@@ -46,6 +58,35 @@ export type FormPattern =
   | 'Workspace';
 
 export class FormPatternTemplates {
+
+  /**
+   * Render a single field input control with the correct control type.
+   *
+   * `indent` is the tab string for the opening `<AxFormControl>` line; child
+   * elements are emitted one tab deeper and the `i:type` attribute two tabs
+   * deeper, matching the surrounding AOT layout. The control type is resolved
+   * from `types` (enum→ComboBox, date→Date, …); unknown fields fall back to a
+   * string control.
+   */
+  static fieldControl(
+    field: string,
+    dsName: string,
+    indent: string,
+    namePrefix = '',
+    types?: FieldControlMap,
+  ): string {
+    const ctl = controlForField(field, types);
+    return (
+      `${indent}<AxFormControl xmlns=""\n` +
+      `${indent}\t\ti:type="${ctl.iType}">\n` +
+      `${indent}\t<Name>${namePrefix}${field}</Name>\n` +
+      `${indent}\t<Type>${ctl.typeValue}</Type>\n` +
+      `${indent}\t<FormControlExtension\n${indent}\t\ti:nil="true" />\n` +
+      `${indent}\t<DataField>${field}</DataField>\n` +
+      `${indent}\t<DataSource>${dsName}</DataSource>\n` +
+      `${indent}</AxFormControl>\n`
+    );
+  }
 
   // ---------------------------------------------------------------------------
   // SimpleList  (v1.1)
@@ -63,14 +104,7 @@ export class FormPatternTemplates {
     const defaultCol = gridFields.length > 0 ? `Grid_${gridFields[0]}` : `Grid_${dsName}`;
 
     const fieldControls = gridFields.map(f =>
-      `\t\t\t\t\t<AxFormControl xmlns=""\n` +
-      `\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
-      `\t\t\t\t\t\t<Name>Grid_${f}</Name>\n` +
-      `\t\t\t\t\t\t<Type>String</Type>\n` +
-      `\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t\t<DataField>${f}</DataField>\n` +
-      `\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
-      `\t\t\t\t\t</AxFormControl>\n`
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t', 'Grid_', opt.fieldTypes)
     ).join('');
 
     const dsFields = gridFields.length > 0
@@ -223,25 +257,18 @@ ${fieldControls}\t\t\t\t</Controls>
     const defaultCol = gridFields.length > 0 ? `Grid_${gridFields[0]}` : `Grid_${dsName}`;
 
     const listFieldControls = gridFields.slice(0, 3).map(f =>
-      `\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
-      `\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
-      `\t\t\t\t\t\t\t\t\t<Name>Grid_${f}</Name>\n` +
-      `\t\t\t\t\t\t\t\t\t<Type>String</Type>\n` +
-      `\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t\t\t\t\t<DataField>${f}</DataField>\n` +
-      `\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
-      `\t\t\t\t\t\t\t\t</AxFormControl>\n`
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t', 'Grid_', opt.fieldTypes)
     ).join('');
 
     const detailFieldControls = gridFields.map(f =>
-      `\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<Name>Overview_${f}</Name>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<Type>String</Type>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<DataField>${f}</DataField>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
-      `\t\t\t\t\t\t\t\t\t\t</AxFormControl>\n`
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t\t', 'Overview_', opt.fieldTypes)
+    ).join('');
+
+    // FastTab page fields: the Tab's FieldsFieldGroups page must hold real
+    // controls — an empty group does not qualify as a "Details Tab Page" and
+    // xppc rejects the Tab as missing that required child.
+    const tabFieldControls = gridFields.map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t', 'Tab_', opt.fieldTypes)
     ).join('');
 
     return `<?xml version="1.0" encoding="utf-8"?>
@@ -309,14 +336,14 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGroupControl">
 \t\t\t\t<Name>GridContainer</Name>
-\t\t\t\t<Pattern>SidePanel</Pattern>
-\t\t\t\t<PatternVersion>1.0</PatternVersion>
+\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
 \t\t\t\t<Type>Group</Type>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl>
 \t\t\t\t\t\t<Name>QuickFilterControl</Name>
+\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t<FormControlExtension>
 \t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
 \t\t\t\t\t\t\t<ExtensionComponents />
@@ -341,78 +368,80 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\ti:type="AxFormGridControl">
 \t\t\t\t\t\t<Name>Grid</Name>
+\t\t\t\t\t\t<AllowEdit>No</AllowEdit>
 \t\t\t\t\t\t<Type>Grid</Type>
+\t\t\t\t\t\t<WidthMode>SizeToContent</WidthMode>
 \t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t<Controls>
 ${listFieldControls}\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<AlternateRowShading>No</AlternateRowShading>
 \t\t\t\t\t\t<DataSource>${dsName}</DataSource>
 \t\t\t\t\t\t<GridLinesStyle>Vertical</GridLinesStyle>
+\t\t\t\t\t\t<MultiSelect>No</MultiSelect>
+\t\t\t\t\t\t<ShowRowLabels>No</ShowRowLabels>
 \t\t\t\t\t\t<Style>List</Style>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
+\t\t\t\t<FrameType>None</FrameType>
 \t\t\t\t<Style>SidePanel</Style>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t<Name>DetailsGroup</Name>
+\t\t\t\t<Name>DetailsHeader</Name>
+\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t<PatternVersion>1.1</PatternVersion>
 \t\t\t\t<Type>Group</Type>
+\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\ti:type="AxFormTabControl">
-\t\t\t\t\t\t<Name>Tab</Name>
-\t\t\t\t\t\t<Type>Tab</Type>
+\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t<Name>Overview</Name>
+\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
+\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t<Controls>
+${detailFieldControls}\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t</AxFormControl>
+\t\t\t\t</Controls>
+\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t<FrameType>None</FrameType>
+\t\t\t</AxFormControl>
+\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t<Name>Tab</Name>
+\t\t\t\t<Type>Tab</Type>
+\t\t\t\t<FormControlExtension
+\t\t\t\t\ti:nil="true" />
+\t\t\t\t<Controls>
+\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t<Name>TabPageGeneral</Name>
+\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t<Type>TabPage</Type>
 \t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t\t\t<Name>TabPageOverview</Name>
-\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
-\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
-\t\t\t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t\t\t<Caption>Overview</Caption>
+\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t<Name>GeneralGroup</Name>
+\t\t\t\t\t\t\t\t<Type>Group</Type>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t\t\t<Controls>
-\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t\t\t\t\t\t\t<Name>OverviewGroup</Name>
-\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
-\t\t\t\t\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
-\t\t\t\t\t\t\t\t\t\t<FormControlExtension
-\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t\t\t<Controls>
-${detailFieldControls}\t\t\t\t\t\t\t\t\t\t</Controls>
-\t\t\t\t\t\t\t\t\t</AxFormControl>
-\t\t\t\t\t\t\t\t</Controls>
-\t\t\t\t\t\t\t</AxFormControl>
-\t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t\t\t<Name>TabPageGeneral</Name>
-\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
-\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
-\t\t\t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t\t\t<Caption>General</Caption>
-\t\t\t\t\t\t\t\t<FormControlExtension
-\t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t<Controls>
-\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t\t\t\t\t\t\t<Name>GeneralGroup</Name>
-\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
-\t\t\t\t\t\t\t\t\t\t<DataGroup>General</DataGroup>
-\t\t\t\t\t\t\t\t\t\t<FormControlExtension
-\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t\t\t<Controls />
-\t\t\t\t\t\t\t\t\t</AxFormControl>
-\t\t\t\t\t\t\t\t</Controls>
+${tabFieldControls}\t\t\t\t\t\t\t\t</Controls>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t<Caption>General</Caption>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
+\t\t\t\t<Style>FastTabs</Style>
 \t\t\t</AxFormControl>
 \t\t</Controls>
 \t</Design>
@@ -436,15 +465,41 @@ ${detailFieldControls}\t\t\t\t\t\t\t\t\t\t</Controls>
       : '';
 
     const overviewFieldControls = gridFields.map(f =>
-      `\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<Name>Overview_${f}</Name>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<Type>String</Type>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<DataField>${f}</DataField>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
-      `\t\t\t\t\t\t\t\t\t\t</AxFormControl>\n`
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t\t', 'Overview_', opt.fieldTypes)
     ).join('');
+
+    // DetailsMaster 1.4 keeps a left NavigationList (SidePanel) whose grid must be
+    // a List-style grid carrying the identifying columns.
+    const navListFieldControls = gridFields.slice(0, 3).map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t', 'NavList_', opt.fieldTypes)
+    ).join('');
+
+    const generalFieldControls = gridFields.map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t\t\t\t', 'General_', opt.fieldTypes)
+    ).join('');
+
+    const gridPanelFieldControls = gridFields.slice(0, 5).map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t', 'GridPanel_', opt.fieldTypes)
+    ).join('');
+
+    // DetailsMaster 1.4 wraps the detail view in a single "Panel Tab" page whose
+    // header is a DetailTitleContainer group carrying a TitleField bound to the
+    // record's identifying field.
+    const titleField = gridFields[0];
+    const detailTitleXml = titleField
+      ? `\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
+        `\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
+        `\t\t\t\t\t\t\t\t\t\t<Name>TitleField</Name>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<Skip>Yes</Skip>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<Type>String</Type>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+        `\t\t\t\t\t\t\t\t\t\t<DataField>${titleField}</DataField>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<ShowLabel>No</ShowLabel>\n` +
+        `\t\t\t\t\t\t\t\t\t\t<Style>TitleField</Style>\n` +
+        `\t\t\t\t\t\t\t\t\t</AxFormControl>\n`
+      : '';
 
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
@@ -480,7 +535,7 @@ public class ${formName} extends FormRun
 \t<Design>
 ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t<Pattern xmlns="">DetailsMaster</Pattern>
-\t\t<PatternVersion xmlns="">1.1</PatternVersion>
+\t\t<PatternVersion xmlns="">1.4</PatternVersion>
 \t\t<Style xmlns="">DetailsFormMaster</Style>
 \t\t<TitleDataSource xmlns="">${dsName}</TitleDataSource>
 \t\t<Controls xmlns="">
@@ -510,16 +565,16 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t<Name>NavigationFilterGroup</Name>
-\t\t\t\t<Pattern>CustomAndQuickFilters</Pattern>
-\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t<Name>NavigationList</Name>
+\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
 \t\t\t\t<Type>Group</Type>
-\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t<Visible>No</Visible>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl>
 \t\t\t\t\t\t<Name>QuickFilterControl</Name>
+\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t<FormControlExtension>
 \t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
 \t\t\t\t\t\t\t<ExtensionComponents />
@@ -527,79 +582,189 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
 \t\t\t\t\t\t\t\t\t<Name>targetControlName</Name>
 \t\t\t\t\t\t\t\t\t<Type>String</Type>
-\t\t\t\t\t\t\t\t\t<Value>Grid</Value>
+\t\t\t\t\t\t\t\t\t<Value>NavigationGrid</Value>
 \t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
 \t\t\t\t\t\t\t</ExtensionProperties>
 \t\t\t\t\t\t</FormControlExtension>
 \t\t\t\t\t</AxFormControl>
+\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\ti:type="AxFormGridControl">
+\t\t\t\t\t\t<Name>NavigationGrid</Name>
+\t\t\t\t\t\t<AllowEdit>No</AllowEdit>
+\t\t\t\t\t\t<Type>Grid</Type>
+\t\t\t\t\t\t<WidthMode>SizeToContent</WidthMode>
+\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t<Controls>
+${navListFieldControls}\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t\t\t<MultiSelect>No</MultiSelect>
+\t\t\t\t\t\t<ShowRowLabels>No</ShowRowLabels>
+\t\t\t\t\t\t<Style>List</Style>
+\t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
-\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
 \t\t\t\t<FrameType>None</FrameType>
-\t\t\t\t<Style>CustomFilter</Style>
-\t\t\t\t<ViewEditMode>Edit</ViewEditMode>
-\t\t\t</AxFormControl>
-\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t<Name>HeaderGroup</Name>
-\t\t\t\t<Type>Group</Type>
-\t\t\t\t<FormControlExtension
-\t\t\t\t\ti:nil="true" />
-\t\t\t\t<Controls />
-\t\t\t\t<DataSource>${dsName}</DataSource>
-\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t<Style>SidePanel</Style>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormTabControl">
 \t\t\t\t<Name>Tab</Name>
+\t\t\t\t<AlignControl>No</AlignControl>
+\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
 \t\t\t\t<Type>Tab</Type>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t<Name>TabPageOverview</Name>
-\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
-\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t<Name>FormTabPageDetail</Name>
 \t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t<Caption>Overview</Caption>
 \t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t\t\t\t\t<Name>OverviewGroup</Name>
+\t\t\t\t\t\t\t\t<Name>DetailHeaderGroup</Name>
 \t\t\t\t\t\t\t\t<Type>Group</Type>
-\t\t\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
+\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t\t\t<Controls>
-${overviewFieldControls}\t\t\t\t\t\t\t\t</Controls>
+${detailTitleXml}\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+\t\t\t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t\t\t\t<Style>DetailTitleContainer</Style>
+\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t\t\t\t\t<Name>DetailTab</Name>
+\t\t\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t\t\t<Type>Tab</Type>
+\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t<Name>TabPageOverview</Name>
+\t\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t<Name>OverviewGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${overviewFieldControls}\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
+\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t\t\t\t\t<Caption>Overview</Caption>
+\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t<Name>TabPageGeneral</Name>
+\t\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t<Name>GeneralGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${generalFieldControls}\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t\t\t\t\t<Caption>General</Caption>
+\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<Style>FastTabs</Style>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<PanelStyle>Details</PanelStyle>
+\t\t\t\t\t\t<Style>DetailsFormDetails</Style>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t<Name>TabPageGeneral</Name>
-\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
-\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t<Name>FormTabPageGrid</Name>
 \t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t<Caption>General</Caption>
 \t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t\t\t\t\t<Name>GeneralGroup</Name>
+\t\t\t\t\t\t\t\t<Name>GridFilterGroup</Name>
+\t\t\t\t\t\t\t\t<Pattern>CustomAndQuickFilters</Pattern>
+\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
 \t\t\t\t\t\t\t\t<Type>Group</Type>
-\t\t\t\t\t\t\t\t<DataGroup>General</DataGroup>
+\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t<Controls />
+\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t<AxFormControl>
+\t\t\t\t\t\t\t\t\t\t<Name>GridQuickFilter</Name>
+\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension>
+\t\t\t\t\t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
+\t\t\t\t\t\t\t\t\t\t\t<ExtensionComponents />
+\t\t\t\t\t\t\t\t\t\t\t<ExtensionProperties>
+\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>targetControlName</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>String</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Value>OverviewGrid</Value>
+\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
+\t\t\t\t\t\t\t\t\t\t\t</ExtensionProperties>
+\t\t\t\t\t\t\t\t\t\t</FormControlExtension>
+\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+\t\t\t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t\t\t\t<Style>CustomFilter</Style>
+\t\t\t\t\t\t\t\t<ViewEditMode>Edit</ViewEditMode>
+\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\ti:type="AxFormGridControl">
+\t\t\t\t\t\t\t\t<Name>OverviewGrid</Name>
+\t\t\t\t\t\t\t\t<AllowEdit>Yes</AllowEdit>
+\t\t\t\t\t\t\t\t<Type>Grid</Type>
+\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t<Controls>
+${gridPanelFieldControls}\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t\t\t\t\t<DefaultAction>OverviewGridDefaultAction</DefaultAction>
+\t\t\t\t\t\t\t\t<MultiSelect>No</MultiSelect>
+\t\t\t\t\t\t\t\t<ShowRowLabels>No</ShowRowLabels>
+\t\t\t\t\t\t\t\t<Style>Tabular</Style>
+\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\ti:type="AxFormCommandButtonControl">
+\t\t\t\t\t\t\t\t<Name>OverviewGridDefaultAction</Name>
+\t\t\t\t\t\t\t\t<Type>CommandButton</Type>
+\t\t\t\t\t\t\t\t<Visible>No</Visible>
+\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t<Command>DetailsView</Command>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<PanelStyle>Grid</PanelStyle>
+\t\t\t\t\t\t<Style>DetailsFormGrid</Style>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
-\t\t\t\t<Style>FastTabs</Style>
+\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t<ShowTabs>No</ShowTabs>
 \t\t\t</AxFormControl>
 \t\t</Controls>
 \t</Design>
@@ -620,24 +785,60 @@ ${overviewFieldControls}\t\t\t\t\t\t\t\t</Controls>
       dsName = formName,
       dsTable = dsName,
       caption,
-      linesDsName = `${dsName}Lines`,
+      linesDsName = `${dsName.replace(/Table$/i, '')}Line`,
       linesDsTable = linesDsName,
       gridFields = [],
+      linesFields = [],
     } = opt;
     const captionXml = caption
       ? `\t\t<Caption xmlns="">${caption}</Caption>\n`
       : '';
 
-    const headerFieldControls = gridFields.map(f =>
-      `\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t<Name>Header_${f}</Name>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t<Type>String</Type>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t<DataField>${f}</DataField>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>\n` +
-      `\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>\n`
+    // Read-only navigation list: up to 3 identifying header fields.
+    const navListColumns = gridFields.slice(0, 3).map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t', 'Nav_', opt.fieldTypes)
     ).join('');
+
+    const headerFieldControls = gridFields.map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t', 'Header_', opt.fieldTypes)
+    ).join('');
+
+    const linesColumns = linesFields.map(f =>
+      FormPatternTemplates.fieldControl(f, linesDsName, '\t\t\t\t\t\t\t\t\t', 'Line_', opt.linesFieldTypes)
+    ).join('');
+
+    // LineViewTab's third page: a line-details fast-tab showing the selected
+    // line's fields (distinct control names from the lines grid columns).
+    const lineDetailControls = linesFields.map(f =>
+      FormPatternTemplates.fieldControl(f, linesDsName, '\t\t\t\t\t\t\t\t\t\t', 'LineDtl_', opt.linesFieldTypes)
+    ).join('');
+
+    // The Grid panel (alternate "list" view) of the MainTab needs its own grid
+    // columns — distinct names from the nav list / header to avoid collisions.
+    const gridPanelColumns = gridFields.slice(0, 5).map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t', 'GridPanel_', opt.fieldTypes)
+    ).join('');
+
+    // The DetailsTab pairs a header-only panel (HeaderView) with the combined
+    // header+lines panel (LineView); its fields need distinct control names.
+    const headerViewFieldControls = gridFields.map(f =>
+      FormPatternTemplates.fieldControl(f, dsName, '\t\t\t\t\t\t\t\t\t\t', 'HView_', opt.fieldTypes)
+    ).join('');
+
+    const dsFieldList = (fields: string[]): string =>
+      fields.length > 0
+        ? `\t\t\t<Fields>\n` +
+          fields.map(f =>
+            `\t\t\t\t<AxFormDataSourceField>\n\t\t\t\t\t<DataField>${f}</DataField>\n\t\t\t\t</AxFormDataSourceField>\n`,
+          ).join('') +
+          `\t\t\t</Fields>\n`
+        : `\t\t\t<Fields />\n`;
+    const headerDsFields = dsFieldList(gridFields);
+    const linesDsFields = dsFieldList(linesFields);
+
+    // DetailsTransaction v1.4 carries the title in a DetailTitleContainer header
+    // (HeaderInfo) bound to the record's identifying field.
+    const titleField = gridFields[0];
 
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
@@ -663,8 +864,7 @@ public class ${formName} extends FormRun
 \t\t<AxFormDataSource xmlns="">
 \t\t\t<Name>${dsName}</Name>
 \t\t\t<Table>${dsTable}</Table>
-\t\t\t<Fields />
-\t\t\t<ReferencedDataSources />
+${headerDsFields}\t\t\t<ReferencedDataSources />
 \t\t\t<InsertIfEmpty>No</InsertIfEmpty>
 \t\t\t<DataSourceLinks />
 \t\t\t<DerivedDataSources />
@@ -672,22 +872,18 @@ public class ${formName} extends FormRun
 \t\t<AxFormDataSource xmlns="">
 \t\t\t<Name>${linesDsName}</Name>
 \t\t\t<Table>${linesDsTable}</Table>
-\t\t\t<Fields />
-\t\t\t<ReferencedDataSources />
+${linesDsFields}\t\t\t<ReferencedDataSources />
+\t\t\t<JoinSource>${dsName}</JoinSource>
+\t\t\t<LinkType>Delayed</LinkType>
 \t\t\t<InsertIfEmpty>No</InsertIfEmpty>
-\t\t\t<DataSourceLinks>
-\t\t\t\t<AxFormDataSourceLink>
-\t\t\t\t\t<LinkType>Active</LinkType>
-\t\t\t\t\t<Table>${dsName}</Table>
-\t\t\t\t</AxFormDataSourceLink>
-\t\t\t</DataSourceLinks>
+\t\t\t<DataSourceLinks />
 \t\t\t<DerivedDataSources />
 \t\t</AxFormDataSource>
 \t</DataSources>
 \t<Design>
 ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t<Pattern xmlns="">DetailsTransaction</Pattern>
-\t\t<PatternVersion xmlns="">1.1</PatternVersion>
+\t\t<PatternVersion xmlns="">1.4</PatternVersion>
 \t\t<Style xmlns="">DetailsFormTransaction</Style>
 \t\t<TitleDataSource xmlns="">${dsName}</TitleDataSource>
 \t\t<Controls xmlns="">
@@ -717,16 +913,16 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t<Name>NavigationFilterGroup</Name>
-\t\t\t\t<Pattern>CustomAndQuickFilters</Pattern>
-\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t<Name>NavigationList</Name>
+\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
 \t\t\t\t<Type>Group</Type>
-\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t<Visible>No</Visible>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl>
-\t\t\t\t\t\t<Name>QuickFilterControl</Name>
+\t\t\t\t\t\t<Name>NavigationListFilter</Name>
+\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t<FormControlExtension>
 \t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
 \t\t\t\t\t\t\t<ExtensionComponents />
@@ -734,88 +930,358 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
 \t\t\t\t\t\t\t\t\t<Name>targetControlName</Name>
 \t\t\t\t\t\t\t\t\t<Type>String</Type>
-\t\t\t\t\t\t\t\t\t<Value>Grid</Value>
+\t\t\t\t\t\t\t\t\t<Value>NavigationListGrid</Value>
 \t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
 \t\t\t\t\t\t\t</ExtensionProperties>
 \t\t\t\t\t\t</FormControlExtension>
 \t\t\t\t\t</AxFormControl>
+\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\ti:type="AxFormGridControl">
+\t\t\t\t\t\t<Name>NavigationListGrid</Name>
+\t\t\t\t\t\t<AllowEdit>No</AllowEdit>
+\t\t\t\t\t\t<Type>Grid</Type>
+\t\t\t\t\t\t<WidthMode>SizeToContent</WidthMode>
+\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t<Controls>
+${navListColumns}\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t\t\t<MultiSelect>No</MultiSelect>
+\t\t\t\t\t\t<ShowRowLabels>No</ShowRowLabels>
+\t\t\t\t\t\t<Style>List</Style>
+\t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
-\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
 \t\t\t\t<FrameType>None</FrameType>
-\t\t\t\t<Style>CustomFilter</Style>
-\t\t\t\t<ViewEditMode>Edit</ViewEditMode>
+\t\t\t\t<Style>SidePanel</Style>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormTabControl">
-\t\t\t\t<Name>Tab</Name>
+\t\t\t\t<Name>MainTab</Name>
+\t\t\t\t<AlignControl>No</AlignControl>
 \t\t\t\t<Type>Tab</Type>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 \t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t<Name>TabPageHeader</Name>
-\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
-\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t<Name>TabPageDetails</Name>
+\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
 \t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t<Caption>Header</Caption>
+\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t\t\t\t\t<Name>HeaderGeneralGroup</Name>
+\t\t\t\t\t\t\t\t<Name>HeaderInfo</Name>
 \t\t\t\t\t\t\t\t<Type>Group</Type>
-\t\t\t\t\t\t\t\t<Caption>General</Caption>
-\t\t\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
+\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t\t\t<Controls>
-${headerFieldControls}\t\t\t\t\t\t\t\t</Controls>
+${titleField ? `\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormStringControl">
+\t\t\t\t\t\t\t\t\t\t<Name>HeaderTitle</Name>
+\t\t\t\t\t\t\t\t\t\t<Skip>Yes</Skip>
+\t\t\t\t\t\t\t\t\t\t<Type>String</Type>
+\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t<DataField>${titleField}</DataField>
+\t\t\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t\t\t\t\t\t\t<ShowLabel>No</ShowLabel>
+\t\t\t\t\t\t\t\t\t\t<Style>TitleField</Style>
+\t\t\t\t\t\t\t\t\t</AxFormControl>\n` : ''}\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+\t\t\t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t\t\t\t<Style>DetailTitleContainer</Style>
 \t\t\t\t\t\t\t</AxFormControl>
-\t\t\t\t\t\t</Controls>
-\t\t\t\t\t</AxFormControl>
-\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
-\t\t\t\t\t\t<Name>TabPageLines</Name>
-\t\t\t\t\t\t<Type>TabPage</Type>
-\t\t\t\t\t\t<Caption>Lines</Caption>
-\t\t\t\t\t\t<FormControlExtension
-\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\ti:type="AxFormActionPaneTabControl">
-\t\t\t\t\t\t\t\t<Name>LinesActionPane</Name>
-\t\t\t\t\t\t\t\t<Type>ActionPaneTab</Type>
+\t\t\t\t\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t\t\t\t\t<Name>DetailsTab</Name>
+\t\t\t\t\t\t\t\t<Type>Tab</Type>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
 \t\t\t\t\t\t\t\t<Controls>
 \t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormButtonGroupControl">
-\t\t\t\t\t\t\t\t\t\t<Name>LinesButtonGroup</Name>
-\t\t\t\t\t\t\t\t\t\t<Type>ButtonGroup</Type>
+\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t<Name>LineView</Name>
+\t\t\t\t\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
+\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t\t\t<Controls />
-\t\t\t\t\t\t\t\t\t\t<ArrangeMethod>Vertical</ArrangeMethod>
+\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineViewTab</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t\t\t\t\t\t\t<Type>Tab</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineViewHeader</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>HeaderGeneralGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${headerFieldControls}\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Caption>Header</Caption>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FastTabExpanded>No</FastTabExpanded>
+\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineViewLines</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormActionPaneControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LinesActionPaneStrip</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>ActionPane</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormActionPaneTabControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LinesActionTab</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>ActionPaneTab</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormButtonGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LinesStripButtonGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>ButtonGroup</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AlignChildren>No</AlignChildren>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<ArrangeMethod>Vertical</ArrangeMethod>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<DataSource>${linesDsName}</DataSource>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Style>Strip</Style>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGridControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LinesGrid</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>Grid</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${linesColumns}\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<DataSource>${linesDsName}</DataSource>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Style>Tabular</Style>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<VisibleRows>5</VisibleRows>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<VisibleRowsMode>Fixed</VisibleRowsMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Caption>Lines</Caption>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FastTabExpanded>Always</FastTabExpanded>
+\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineViewLineDetails</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineDetailsTab</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>Tab</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>TabLineGeneral</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>LineDetailsGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${lineDetailControls}\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Caption>General</Caption>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Style>Tabs</Style>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Caption>Line details</Caption>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<DataSource>${linesDsName}</DataSource>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FastTabExpanded>No</FastTabExpanded>
+\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t\t\t\t\t\t\t\t\t<Style>FastTabs</Style>
+\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t<PanelStyle>DetailsLine</PanelStyle>
+\t\t\t\t\t\t\t\t\t\t<Style>DetailsFormDetails</Style>
+\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t<Name>HeaderView</Name>
+\t\t\t\t\t\t\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
+\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabControl">
+\t\t\t\t\t\t\t\t\t\t\t\t<Name>HeaderDetailsTab</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
+\t\t\t\t\t\t\t\t\t\t\t\t<Type>Tab</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>TabHeaderGeneral</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>HeaderViewGroup</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Controls>
+${headerViewFieldControls}\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>
+\t\t\t\t\t\t\t\t\t\t\t\t\t\t<Caption>General</Caption>
+\t\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t\t\t\t\t\t\t\t\t<Style>FastTabs</Style>
+\t\t\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t\t\t<PanelStyle>DetailsHeader</PanelStyle>
+\t\t\t\t\t\t\t\t\t\t<Style>DetailsFormDetails</Style>
 \t\t\t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t\t\t\t\t<ShowTabs>No</ShowTabs>
+\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<PanelStyle>Details</PanelStyle>
+\t\t\t\t\t\t<Style>DetailsFormDetails</Style>
+\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\ti:type="AxFormTabPageControl">
+\t\t\t\t\t\t<Name>TabPageGrid</Name>
+\t\t\t\t\t\t<Type>TabPage</Type>
+\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
+\t\t\t\t\t\t\t\t<Name>GridFilterGroup</Name>
+\t\t\t\t\t\t\t\t<Pattern>CustomAndQuickFilters</Pattern>
+\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>
+\t\t\t\t\t\t\t\t<Type>Group</Type>
+\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t<Controls>
+\t\t\t\t\t\t\t\t\t<AxFormControl>
+\t\t\t\t\t\t\t\t\t\t<Name>GridQuickFilter</Name>
+\t\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
+\t\t\t\t\t\t\t\t\t\t<FormControlExtension>
+\t\t\t\t\t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
+\t\t\t\t\t\t\t\t\t\t\t<ExtensionComponents />
+\t\t\t\t\t\t\t\t\t\t\t<ExtensionProperties>
+\t\t\t\t\t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Name>targetControlName</Name>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Type>String</Type>
+\t\t\t\t\t\t\t\t\t\t\t\t\t<Value>OverviewGrid</Value>
+\t\t\t\t\t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
+\t\t\t\t\t\t\t\t\t\t\t</ExtensionProperties>
+\t\t\t\t\t\t\t\t\t\t</FormControlExtension>
+\t\t\t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
+\t\t\t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t\t\t\t<Style>CustomFilter</Style>
+\t\t\t\t\t\t\t\t<ViewEditMode>Edit</ViewEditMode>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGridControl">
-\t\t\t\t\t\t\t\t<Name>LinesGrid</Name>
+\t\t\t\t\t\t\t\t<Name>OverviewGrid</Name>
+\t\t\t\t\t\t\t\t<AllowEdit>Yes</AllowEdit>
 \t\t\t\t\t\t\t\t<Type>Grid</Type>
 \t\t\t\t\t\t\t\t<FormControlExtension
 \t\t\t\t\t\t\t\t\ti:nil="true" />
-\t\t\t\t\t\t\t\t<Controls />
-\t\t\t\t\t\t\t\t<DataSource>${linesDsName}</DataSource>
-\t\t\t\t\t\t\t\t<DataGroup>Overview</DataGroup>
+\t\t\t\t\t\t\t\t<Controls>
+${gridPanelColumns}\t\t\t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t\t\t<DataSource>${dsName}</DataSource>
+\t\t\t\t\t\t\t\t<DefaultAction>OverviewGridDefaultAction</DefaultAction>
+\t\t\t\t\t\t\t\t<MultiSelect>No</MultiSelect>
+\t\t\t\t\t\t\t\t<ShowRowLabels>No</ShowRowLabels>
 \t\t\t\t\t\t\t\t<Style>Tabular</Style>
 \t\t\t\t\t\t\t</AxFormControl>
+\t\t\t\t\t\t\t<AxFormControl xmlns=""
+\t\t\t\t\t\t\t\t\ti:type="AxFormCommandButtonControl">
+\t\t\t\t\t\t\t\t<Name>OverviewGridDefaultAction</Name>
+\t\t\t\t\t\t\t\t<Type>CommandButton</Type>
+\t\t\t\t\t\t\t\t<Visible>No</Visible>
+\t\t\t\t\t\t\t\t<FormControlExtension
+\t\t\t\t\t\t\t\t\ti:nil="true" />
+\t\t\t\t\t\t\t\t<Command>DetailsView</Command>
+\t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<PanelStyle>Grid</PanelStyle>
+\t\t\t\t\t\t<Style>DetailsFormGrid</Style>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
-\t\t\t\t<Style>FastTabs</Style>
+\t\t\t\t<AlignChild>No</AlignChild>
+\t\t\t\t<ArrangeMethod>Vertical</ArrangeMethod>
+\t\t\t\t<ShowTabs>No</ShowTabs>
 \t\t\t</AxFormControl>
 \t\t</Controls>
 \t</Design>
@@ -894,6 +1360,14 @@ ${headerFieldControls}\t\t\t\t\t\t\t\t</Controls>
       ? ''
       : `\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>\n\t\t\t\t<PatternVersion>1.1</PatternVersion>\n`;
 
+    // The 'Dialog - Basic' pattern requires the body to fill the dialog. D365
+    // serializes a control's properties in two alphabetical groups split by
+    // <Controls>: HeightMode/WidthMode belong to the BEFORE group (HeightMode
+    // before Pattern, WidthMode after Type), ColumnsMode to the AFTER group.
+    const dialogBodyLayout = sections.length > 0
+      ? ''
+      : `\t\t\t\t<ColumnsMode>Fill</ColumnsMode>\n`;
+
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxForm xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">
 \t<Name>${formName}</Name>
@@ -923,17 +1397,20 @@ ${captionXml}\t\t<Frame xmlns="">Dialog</Frame>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGroupControl">
 \t\t\t\t<Name>DialogBody</Name>
+\t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
 ${dialogBodyPattern}\t\t\t\t<Type>Group</Type>
+\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 ${bodyContent}\t\t\t\t</Controls>
-\t\t\t\t<Style>DialogContent</Style>
+${dialogBodyLayout}\t\t\t\t<Style>DialogContent</Style>
 \t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormButtonGroupControl">
 \t\t\t\t<Name>ButtonGroup</Name>
 \t\t\t\t<Type>ButtonGroup</Type>
+\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t<FormControlExtension
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
@@ -954,6 +1431,7 @@ ${bodyContent}\t\t\t\t</Controls>
 \t\t\t\t\t\t<Command>Cancel</Command>
 \t\t\t\t\t</AxFormControl>
 \t\t\t\t</Controls>
+\t\t\t\t<ArrangeMethod>HorizontalRight</ArrangeMethod>
 \t\t\t\t<Style>DialogCommitContainer</Style>
 \t\t\t</AxFormControl>
 \t\t</Controls>
@@ -970,7 +1448,7 @@ ${bodyContent}\t\t\t\t</Controls>
   // Structure: Tab control (TOC navigation) → TabPages (FieldsFieldGroups each)
   // ---------------------------------------------------------------------------
   static buildTableOfContents(opt: FormTemplateOptions): string {
-    const { formName, dsName, dsTable, caption, sections = [] } = opt;
+    const { formName, dsName, dsTable, caption, sections = [], gridFields = [] } = opt;
     const captionXml = caption
       ? `\t\t<Caption xmlns="">${caption}</Caption>\n`
       : '';
@@ -982,17 +1460,72 @@ ${bodyContent}\t\t\t\t</Controls>
           { name: 'TabPageSetup',    caption: 'Setup' },
         ];
 
+    // TableOfContents = a single TOC navigation Tab whose every page carries a
+    // TOCTitleContainer group (heading) plus a nested FastTabs tab holding the
+    // FieldsFieldGroups content. The section TabPage itself is unpatterned.
+    const sectionFields = (s: { name: string }): string =>
+      (dsName ? gridFields : []).map(f =>
+        FormPatternTemplates.fieldControl(f, dsName!, '\t\t\t\t\t\t\t\t\t\t', `${s.name}_`, opt.fieldTypes),
+      ).join('');
+
     const tabPageControls = effectiveSections.map(s =>
       `\t\t\t\t<AxFormControl xmlns=""\n` +
       `\t\t\t\t\t\ti:type="AxFormTabPageControl">\n` +
       `\t\t\t\t\t<Name>${s.name}</Name>\n` +
-      `\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>\n` +
-      `\t\t\t\t\t<PatternVersion>1.1</PatternVersion>\n` +
       `\t\t\t\t\t<Type>TabPage</Type>\n` +
-      `\t\t\t\t\t<Caption>${s.caption}</Caption>\n` +
-      `\t\t\t\t\t<FrameType>None</FrameType>\n` +
       `\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\ti:nil="true" />\n` +
-      `\t\t\t\t\t<Controls />\n` +
+      `\t\t\t\t\t<Controls>\n` +
+      // TOC heading
+      `\t\t\t\t\t\t<AxFormControl xmlns=""\n\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">\n` +
+      `\t\t\t\t\t\t\t<Name>${s.name}Title</Name>\n` +
+      `\t\t\t\t\t\t\t<Skip>Yes</Skip>\n` +
+      `\t\t\t\t\t\t\t<Type>Group</Type>\n` +
+      `\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>\n` +
+      `\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+      `\t\t\t\t\t\t\t<Controls>\n` +
+      `\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n\t\t\t\t\t\t\t\t\t\ti:type="AxFormStaticTextControl">\n` +
+      `\t\t\t\t\t\t\t\t\t<Name>${s.name}Instruction</Name>\n` +
+      `\t\t\t\t\t\t\t\t\t<Skip>Yes</Skip>\n` +
+      `\t\t\t\t\t\t\t\t\t<Type>StaticText</Type>\n` +
+      `\t\t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>\n` +
+      `\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+      `\t\t\t\t\t\t\t\t\t<Style>MainInstruction</Style>\n` +
+      `\t\t\t\t\t\t\t\t\t<Text>${s.caption}</Text>\n` +
+      `\t\t\t\t\t\t\t\t</AxFormControl>\n` +
+      `\t\t\t\t\t\t\t</Controls>\n` +
+      `\t\t\t\t\t\t\t<AllowUserSetup>No</AllowUserSetup>\n` +
+      `\t\t\t\t\t\t\t<FrameType>None</FrameType>\n` +
+      `\t\t\t\t\t\t\t<Style>TOCTitleContainer</Style>\n` +
+      `\t\t\t\t\t\t</AxFormControl>\n` +
+      // nested FastTabs content tab
+      `\t\t\t\t\t\t<AxFormControl xmlns=""\n\t\t\t\t\t\t\t\ti:type="AxFormTabControl">\n` +
+      `\t\t\t\t\t\t\t<Name>${s.name}FastTab</Name>\n` +
+      `\t\t\t\t\t\t\t<Type>Tab</Type>\n` +
+      `\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+      `\t\t\t\t\t\t\t<Controls>\n` +
+      `\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n\t\t\t\t\t\t\t\t\t\ti:type="AxFormTabPageControl">\n` +
+      `\t\t\t\t\t\t\t\t\t<Name>${s.name}Page</Name>\n` +
+      `\t\t\t\t\t\t\t\t\t<Pattern>FieldsFieldGroups</Pattern>\n` +
+      `\t\t\t\t\t\t\t\t\t<PatternVersion>1.1</PatternVersion>\n` +
+      `\t\t\t\t\t\t\t\t\t<Type>TabPage</Type>\n` +
+      `\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+      `\t\t\t\t\t\t\t\t\t<Controls>\n` +
+      `\t\t\t\t\t\t\t\t\t\t<AxFormControl xmlns=""\n\t\t\t\t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">\n` +
+      `\t\t\t\t\t\t\t\t\t\t\t<Name>${s.name}Group</Name>\n` +
+      `\t\t\t\t\t\t\t\t\t\t\t<Type>Group</Type>\n` +
+      `\t\t\t\t\t\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\t\t\t\t\t\ti:nil="true" />\n` +
+      `\t\t\t\t\t\t\t\t\t\t\t<Controls>\n` +
+      sectionFields(s) +
+      `\t\t\t\t\t\t\t\t\t\t\t</Controls>\n` +
+      `\t\t\t\t\t\t\t\t\t\t</AxFormControl>\n` +
+      `\t\t\t\t\t\t\t\t\t</Controls>\n` +
+      `\t\t\t\t\t\t\t\t\t<ColumnsMode>Fill</ColumnsMode>\n` +
+      `\t\t\t\t\t\t\t\t\t<Caption>${s.caption}</Caption>\n` +
+      `\t\t\t\t\t\t\t\t</AxFormControl>\n` +
+      `\t\t\t\t\t\t\t</Controls>\n` +
+      `\t\t\t\t\t\t\t<Style>FastTabs</Style>\n` +
+      `\t\t\t\t\t\t</AxFormControl>\n` +
+      `\t\t\t\t\t</Controls>\n` +
       `\t\t\t\t</AxFormControl>\n`
     ).join('');
 
@@ -1038,14 +1571,6 @@ ${captionXml}${dsOnDesign}\t\t<Pattern xmlns="">TableOfContents</Pattern>
 \t\t<Style xmlns="">TableOfContents</Style>
 \t\t<Controls xmlns="">
 \t\t\t<AxFormControl xmlns=""
-\t\t\t\t\ti:type="AxFormActionPaneControl">
-\t\t\t\t<Name>ActionPane</Name>
-\t\t\t\t<Type>ActionPane</Type>
-\t\t\t\t<FormControlExtension
-\t\t\t\t\ti:nil="true" />
-\t\t\t\t<Controls />
-\t\t\t</AxFormControl>
-\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormTabControl">
 \t\t\t\t<Name>Tab</Name>
 \t\t\t\t<Type>Tab</Type>
@@ -1053,7 +1578,7 @@ ${captionXml}${dsOnDesign}\t\t<Pattern xmlns="">TableOfContents</Pattern>
 \t\t\t\t\ti:nil="true" />
 \t\t\t\t<Controls>
 ${tabPageControls}\t\t\t\t</Controls>
-\t\t\t\t<Style>TOCList</Style>
+\t\t\t\t<Style>VerticalTabs</Style>
 \t\t\t</AxFormControl>
 \t\t</Controls>
 \t</Design>
@@ -1073,7 +1598,6 @@ ${tabPageControls}\t\t\t\t</Controls>
     const captionXml = caption
       ? `\t\t<Caption xmlns="">${caption}</Caption>\n`
       : '';
-    const defaultCol = gridFields.length > 0 ? `Grid_${gridFields[0]}` : `Grid_${dsName}`;
 
     const fieldControls = gridFields.map(f =>
       `\t\t\t\t\t<AxFormControl xmlns=""\n` +
@@ -1117,53 +1641,21 @@ public class ${formName} extends FormRun
 \t\t</AxFormDataSource>
 \t</DataSources>
 \t<Design>
-${captionXml}\t\t<Pattern xmlns="">Lookup</Pattern>
-\t\t<PatternVersion xmlns="">1.2</PatternVersion>
+${captionXml}\t\t<Frame xmlns="">Border</Frame>
+\t\t<HeightMode xmlns="">SizeToContent</HeightMode>
+\t\t<Pattern xmlns="">LookupGridOnly</Pattern>
+\t\t<PatternVersion xmlns="">1.1</PatternVersion>
 \t\t<Style xmlns="">Lookup</Style>
+\t\t<WidthMode xmlns="">SizeToAvailable</WidthMode>
+\t\t<WindowType xmlns="">Popup</WindowType>
 \t\t<Controls xmlns="">
-\t\t\t<AxFormControl xmlns=""
-\t\t\t\t\ti:type="AxFormGroupControl">
-\t\t\t\t<Name>CustomFilterGroup</Name>
-\t\t\t\t<Pattern>CustomAndQuickFilters</Pattern>
-\t\t\t\t<PatternVersion>1.1</PatternVersion>
-\t\t\t\t<Type>Group</Type>
-\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
-\t\t\t\t<FormControlExtension
-\t\t\t\t\ti:nil="true" />
-\t\t\t\t<Controls>
-\t\t\t\t\t<AxFormControl>
-\t\t\t\t\t\t<Name>QuickFilterControl</Name>
-\t\t\t\t\t\t<FormControlExtension>
-\t\t\t\t\t\t\t<Name>QuickFilterControl</Name>
-\t\t\t\t\t\t\t<ExtensionComponents />
-\t\t\t\t\t\t\t<ExtensionProperties>
-\t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t\t\t<Name>targetControlName</Name>
-\t\t\t\t\t\t\t\t\t<Type>String</Type>
-\t\t\t\t\t\t\t\t\t<Value>Grid</Value>
-\t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t\t\t<Name>defaultColumnName</Name>
-\t\t\t\t\t\t\t\t\t<Type>String</Type>
-\t\t\t\t\t\t\t\t\t<Value>${defaultCol}</Value>
-\t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t\t<AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t\t\t<Name>placeholderText</Name>
-\t\t\t\t\t\t\t\t\t<Type>String</Type>
-\t\t\t\t\t\t\t\t</AxFormControlExtensionProperty>
-\t\t\t\t\t\t\t</ExtensionProperties>
-\t\t\t\t\t\t</FormControlExtension>
-\t\t\t\t\t</AxFormControl>
-\t\t\t\t</Controls>
-\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
-\t\t\t\t<FrameType>None</FrameType>
-\t\t\t\t<Style>CustomFilter</Style>
-\t\t\t</AxFormControl>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGridControl">
 \t\t\t\t<Name>Grid</Name>
+\t\t\t\t<AllowEdit>No</AllowEdit>
 \t\t\t\t<ElementPosition>1431655764</ElementPosition>
 \t\t\t\t<FilterExpression>%1</FilterExpression>
+\t\t\t\t<HeightMode>SizeToContent</HeightMode>
 \t\t\t\t<Type>Grid</Type>
 \t\t\t\t<VerticalSpacing>-1</VerticalSpacing>
 \t\t\t\t<FormControlExtension
@@ -1244,7 +1736,7 @@ public class ${formName} extends FormRun
 \t<Design>
 ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t<Pattern xmlns="">ListPage</Pattern>
-\t\t<PatternVersion xmlns="">1.1</PatternVersion>
+\t\t<PatternVersion xmlns="">UX7 1.0</PatternVersion>
 \t\t<Style xmlns="">ListPage</Style>
 \t\t<TitleDataSource xmlns="">${dsName}</TitleDataSource>
 \t\t<Controls xmlns="">
@@ -1330,6 +1822,7 @@ ${captionXml}\t\t<DataSource xmlns="">${dsName}</DataSource>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormGridControl">
 \t\t\t\t<Name>Grid</Name>
+\t\t\t\t<AllowEdit>No</AllowEdit>
 \t\t\t\t<ElementPosition>1431655764</ElementPosition>
 \t\t\t\t<FilterExpression>%1</FilterExpression>
 \t\t\t\t<Type>Grid</Type>
@@ -1371,7 +1864,6 @@ ${fieldControls}\t\t\t\t</Controls>
       `\t\t\t\t\t<AxFormControl xmlns=""\n` +
       `\t\t\t\t\t\t\ti:type="AxFormTabPageControl">\n` +
       `\t\t\t\t\t\t<Name>${sec.name}Section</Name>\n` +
-      `\t\t\t\t\t\t<Caption>${sec.caption}</Caption>\n` +
       `\t\t\t\t\t\t<ElementPosition>${536870912 * (idx + 2)}</ElementPosition>\n` +
       `\t\t\t\t\t\t<Type>TabPage</Type>\n` +
       `\t\t\t\t\t\t<FormControlExtension\n\t\t\t\t\t\t\ti:nil="true" />\n` +
@@ -1403,6 +1895,7 @@ ${fieldControls}\t\t\t\t</Controls>
       `\t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>\n` +
       `\t\t\t\t\t\t\t\t<FrameType>None</FrameType>\n` +
       `\t\t\t\t\t\t\t\t<Style>CustomFilter</Style>\n` +
+      `\t\t\t\t\t\t\t\t<ViewEditMode>Edit</ViewEditMode>\n` +
       `\t\t\t\t\t\t\t</AxFormControl>\n` +
       `\t\t\t\t\t\t\t<AxFormControl xmlns=""\n` +
       `\t\t\t\t\t\t\t\t\ti:type="AxFormGridControl">\n` +
@@ -1416,7 +1909,9 @@ ${fieldControls}\t\t\t\t</Controls>
       `\t\t\t\t\t\t\t\t<Style>Tabular</Style>\n` +
       `\t\t\t\t\t\t\t</AxFormControl>\n` +
       `\t\t\t\t\t\t</Controls>\n` +
+      `\t\t\t\t\t\t<FastTabExpanded>Yes</FastTabExpanded>\n` +
       `\t\t\t\t\t\t<FrameType>None</FrameType>\n` +
+      `\t\t\t\t\t\t<Caption>${sec.caption}</Caption>\n` +
       `\t\t\t\t\t</AxFormControl>\n`
     ).join('');
 
@@ -1455,9 +1950,12 @@ public class ${formName} extends FormRun
 \t\t</AxFormDataSource>
 \t</DataSources>
 \t<Design>
-${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
-\t\t<PatternVersion xmlns="">1.0</PatternVersion>
+${captionXml}\t\t<Pattern xmlns="">WorkspaceOperational</Pattern>
+\t\t<PatternVersion xmlns="">1.1</PatternVersion>
+\t\t<ShowDeleteButton xmlns="">No</ShowDeleteButton>
+\t\t<ShowNewButton xmlns="">No</ShowNewButton>
 \t\t<Style xmlns="">Workspace</Style>
+\t\t<ViewEditMode xmlns="">View</ViewEditMode>
 \t\t<Controls xmlns="">
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormActionPaneControl">
@@ -1494,7 +1992,9 @@ ${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
 \t\t\t<AxFormControl xmlns=""
 \t\t\t\t\ti:type="AxFormTabControl">
 \t\t\t\t<Name>PanoramaBody</Name>
+\t\t\t\t<AutoDeclaration>Yes</AutoDeclaration>
 \t\t\t\t<ElementPosition>268435455</ElementPosition>
+\t\t\t\t<ExtendedStyle>tab_simpleFastTab</ExtendedStyle>
 \t\t\t\t<Type>Tab</Type>
 \t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t<HeightMode>SizeToAvailable</HeightMode>
@@ -1504,7 +2004,6 @@ ${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
 \t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\ti:type="AxFormTabPageControl">
 \t\t\t\t\t\t<Name>SummarySection</Name>
-\t\t\t\t\t\t<Caption>Summary</Caption>
 \t\t\t\t\t\t<ElementPosition>536870911</ElementPosition>
 \t\t\t\t\t\t<Type>TabPage</Type>
 \t\t\t\t\t\t<FormControlExtension
@@ -1513,8 +2012,6 @@ ${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
 \t\t\t\t\t\t\t\t<Name>TileSection</Name>
-\t\t\t\t\t\t\t\t<Pattern>Workspace_SummaryNumbers_UnboundFields</Pattern>
-\t\t\t\t\t\t\t\t<PatternVersion>1.0</PatternVersion>
 \t\t\t\t\t\t\t\t<Type>Group</Type>
 \t\t\t\t\t\t\t\t<WidthMode>SizeToAvailable</WidthMode>
 \t\t\t\t\t\t\t\t<FormControlExtension
@@ -1525,7 +2022,6 @@ ${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
 \t\t\t\t\t\t\t\t</Controls>
 \t\t\t\t\t\t\t\t<ArrangeMethod>HorizontalLeft</ArrangeMethod>
 \t\t\t\t\t\t\t\t<FrameType>None</FrameType>
-\t\t\t\t\t\t\t\t<Style>TileSection</Style>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t\t<AxFormControl xmlns=""
 \t\t\t\t\t\t\t\t\ti:type="AxFormGroupControl">
@@ -1541,12 +2037,14 @@ ${captionXml}\t\t<Pattern xmlns="">Workspace</Pattern>
 \t\t\t\t\t\t\t\t<FrameType>None</FrameType>
 \t\t\t\t\t\t\t</AxFormControl>
 \t\t\t\t\t\t</Controls>
+\t\t\t\t\t\t<FastTabExpanded>Yes</FastTabExpanded>
 \t\t\t\t\t\t<FrameType>None</FrameType>
+\t\t\t\t\t\t<Caption>Summary</Caption>
 \t\t\t\t\t</AxFormControl>
 ${listSections}\t\t\t\t</Controls>
 \t\t\t\t<AlignChild>No</AlignChild>
-\t\t\t\t<ShowTabs>No</ShowTabs>
-\t\t\t\t<Style>Panorama</Style>
+\t\t\t\t<ShowTabs>Yes</ShowTabs>
+\t\t\t\t<Style>FastTabs</Style>
 \t\t\t</AxFormControl>
 \t\t</Controls>
 \t</Design>

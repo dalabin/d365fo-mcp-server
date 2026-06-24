@@ -6,25 +6,35 @@
 import type { FormPatternSpec, NodeSpec } from '../../types.js';
 import { actionPane } from './common.js';
 
+// Left nav list: a Group with Style=SidePanel. NOTE: SidePanel is a *Style*, not
+// a <Pattern> — the platform has no "SidePanel" sub-pattern (mining confirmed),
+// so this container carries no sub-pattern.
 const navigationListPanel: NodeSpec = {
   id: 'NavigationList',
   controlTypes: ['Group'],
   occurrence: 'required',
   nameHint: 'GridContainer',
   properties: { Style: 'SidePanel' },
-  requiresSubPattern: true,
-  allowedSubPatterns: ['SidePanel'],
   extraChildren: 'any',
 };
 
-const detailsPanel: NodeSpec = {
-  id: 'DetailsPanel',
-  controlTypes: ['Group', 'Tab'],
-  occurrence: 'required',
-  nameHint: 'DetailsGroup',
-  requiresSubPattern: true,
-  // Details content commonly follows a fields layout or contains a Tab
+// Always-visible header fields above the detail tabs (FieldsFieldGroups group).
+const detailsHeader: NodeSpec = {
+  id: 'DetailsHeader',
+  controlTypes: ['Group'],
+  occurrence: 'optional',
+  nameHint: 'DetailsHeader',
   allowedSubPatterns: ['FieldsFieldGroups', 'TabularFields', 'ToolbarAndFields'],
+  extraChildren: 'any',
+};
+
+// The detail FastTabs ("Details Tabs"). Optional in the catalog so clones of
+// older layouts (Tab nested in a Group) are not rejected; the generator emits it.
+const detailsTabs: NodeSpec = {
+  id: 'DetailsTabs',
+  controlTypes: ['Tab', 'Group'],
+  occurrence: 'optional',
+  nameHint: 'Tab',
   extraChildren: 'any',
 };
 
@@ -50,7 +60,7 @@ export const simpleListDetailsListGrid: FormPatternSpec = {
   referenceForms: ['PaymTerm', 'CustPaymModeTable', 'BankGroup'],
   designProperties: { Style: 'SimpleListDetails' },
   requiresDataSource: 'one',
-  root: [actionPane('required'), navigationListPanel, detailsPanel],
+  root: [actionPane('required'), navigationListPanel, detailsHeader, detailsTabs],
   extraRootChildren: 'none',
   lifecycleGuidance: [
     'Override the datasource active() to refresh dependent detail content when selection changes.',
@@ -87,7 +97,8 @@ export const simpleListDetailsTree: FormPatternSpec = {
       properties: { Style: 'SidePanel' },
       extraChildren: 'any',
     },
-    detailsPanel,
+    detailsHeader,
+    detailsTabs,
   ],
   extraRootChildren: 'none',
 };

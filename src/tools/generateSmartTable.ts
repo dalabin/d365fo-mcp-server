@@ -105,7 +105,10 @@ export const generateSmartTableTool: Tool = {
           '"platnost do" or "ValidTo" or "to date" → "ValidTo", ' +
           '"active" or "active flag" → "Active", ' +
           '"customer" or "customer account" → "CustAccount". ' +
-          'Example call: fieldsHint="AccountNum, Name, Description, ValidFrom, ValidTo"',
+          'Example call: fieldsHint="AccountNum, Name, Description, ValidFrom, ValidTo". ' +
+          '⚠️ EDT auto-suggestion is index-based: custom EDTs/enums created in the SAME SESSION are not yet in the ' +
+          'index and those fields will fall back to String255. Call update_symbol_index BEFORE scaffolding to ensure ' +
+          'the new custom EDTs are resolved correctly.',
       },
       primaryKeyFields: {
         type: 'array',
@@ -338,9 +341,15 @@ export async function handleGenerateSmartTable(
     const hintDb = symbolIndex.getReadDb();
 
     for (const hint of hintFields) {
-      // Check if field already exists
-      if (fields.find(f => f.name === hint)) {
-        continue;
+      // Duplicate field name in hint list (e.g. agent passed the EDT name twice: "AmountMST, AmountMST"
+      // instead of distinct field names like "DailyRate, LineAmount"). Preserve both by suffixing the
+      // second occurrence rather than silently dropping it — the caller wanted two separate fields.
+      let fieldName = hint;
+      if (fields.find(f => f.name === fieldName)) {
+        let suffix = 2;
+        while (fields.find(f => f.name === `${hint}${suffix}`)) suffix++;
+        fieldName = `${hint}${suffix}`;
+        console.warn(`[generateSmartTable] Duplicate hint "${hint}" → renamed to "${fieldName}"`);
       }
 
       const edt = resolveBestEdt(hint, hintDb);
@@ -356,7 +365,7 @@ export async function handleGenerateSmartTable(
         hintLower === 'num' ||
         hintLower === 'code';
       fields.push({
-        name: hint,
+        name: fieldName,
         edt,
         mandatory: isMandatory,
       });
@@ -395,14 +404,32 @@ export async function handleGenerateSmartTable(
   {
     const db = symbolIndex.getReadDb();
     for (const f of fields) {
+      // The resolved "EDT" may actually be an enum (e.g. a custom RentStatus enum
+      // or a field that resolveBestEdt echoed back as a same-session custom type).
+      // An enum-backed field must be AxTableFieldEnum + EnumType, not String + EDT.
+      if (f.edt && !f.enumType && isEnumName(f.edt, db)) {
+        f.enumType = f.edt;
+        f.type = 'Enum';
+        f.edt = undefined;
+        continue;
+      }
       if (f.edt && !f.type) {
-        f.type = resolveEdtBaseType(f.edt, db);
+        // Authoritative base type from the C# bridge (live IMetadataProvider) when
+        // available. The symbol index stores extends=null for ROOT Date/Real/Int64
+        // EDTs (e.g. TransDate→Date, Qty→Real), so resolveEdtBaseType wrongly
+        // defaulted them to String — the #1 source of "scaffold made my date/amount
+        // field a string". The bridge reads the real AxEdt element type and resolves
+        // it correctly. Fall back to the index + name heuristic only when the bridge
+        // is unavailable (Azure/Linux) or doesn't know the EDT.
+        f.type = await bridgeEdtBaseType(bridge, f.edt)
+              ?? resolveEdtBaseType(f.edt, db)
+              ?? heuristicEdtBaseType(f.edt);
       }
       // Validate EDT exists in the symbol index
       if (f.edt) {
         const edtExists = validateEdtExists(f.edt, db);
         if (!edtExists) {
-          edtWarnings.push(`⚠️ Field "${f.name}": EDT "${f.edt}" not found in indexed metadata — will cause build error 'EdtDoesNotExist'. Change to an existing EDT.`);
+          edtWarnings.push(`⚠️ Field "${f.name}": "${f.edt}" not found in indexed metadata as an EDT or enum — if it is a same-session custom type, call update_symbol_index on its file first, then regenerate. Otherwise this will cause a build error.`);
         }
       }
     }
@@ -473,7 +500,12 @@ export async function handleGenerateSmartTable(
   // and may miss packagePath from config if ensureLoaded() was not yet called.
   const configManager = getConfigManager();
   await configManager.ensureLoaded();
-  const resolvedPackagePath = argPackagePath || configManager.getPackagePath();
+  // Prefer the bridge's custom packages root (where bridge-backed writes actually land,
+  // e.g. a repo metadata checkout like K:\repos\…\metadata) so the exists-guard, the
+  // fallback write target, and the reported path all match the real write location.
+  // Falls back to the standard PackagesLocalDirectory for traditional environments.
+  const customPackagesRoot = await configManager.getCustomPackagesPath();
+  const resolvedPackagePath = argPackagePath || customPackagesRoot || configManager.getPackagePath();
   // getPackagePath() already probes C:\ and K:\ well-known locations before returning null,
   // so reaching here with null means neither location exists on this machine.
   if (!resolvedPackagePath && process.platform === 'win32') {
@@ -756,6 +788,7 @@ export async function handleGenerateSmartTable(
         name: f.name,
         fieldType: f.type || undefined,
         edt: f.edt || undefined,
+        enumType: f.enumType || undefined,
         mandatory: f.mandatory || false,
         label: f.label || undefined,
       })),
@@ -833,7 +866,7 @@ export async function handleGenerateSmartTable(
               edtWarningBlock,
               projectMessage,
               ``,
-              `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
+              `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk at the path above. Calling d365fo_file would create a DUPLICATE at a different path which causes build conflicts.`,
               `⛔ DO NOT call \`generate\` again — task is COMPLETE.`,
               ``,
               `Next steps for the user:`,
@@ -956,7 +989,7 @@ export async function handleGenerateSmartTable(
           edtWarningBlock,
           projectMessage,
           ``,
-          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
+          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk at the path above. Calling d365fo_file would create a DUPLICATE at a different path which causes build conflicts.`,
           `⛔ DO NOT call \`generate\` again — task is COMPLETE.`,
           ``,
           `Next steps for the user:`,
@@ -970,15 +1003,43 @@ export async function handleGenerateSmartTable(
 }
 
 /**
+ * Resolve an EDT's primitive base type via the C# bridge (live IMetadataProvider).
+ *
+ * The bridge reads the real AxEdt element type (AxEdtDate/AxEdtReal/AxEdtInt64/…),
+ * so it correctly distinguishes a ROOT Date/Real EDT from a String one — which the
+ * symbol index CANNOT, because it stores extends=null for root EDTs regardless of
+ * their primitive. Returns a token compatible with resolveEdtBaseType
+ * (String/Integer/Real/Date/Int64/Guid/…), or undefined when the bridge is
+ * unavailable, doesn't know the EDT, or reports it as Enum (enum-backed EDTs are
+ * handled separately via the enumType path, so we must not emit a bare "Enum" here).
+ */
+async function bridgeEdtBaseType(bridge: BridgeClient | undefined, edtName: string): Promise<string | undefined> {
+  if (!bridge?.isReady) return undefined;
+  try {
+    const info = await bridge.readEdt(edtName);
+    const bt = (info as any)?.baseType;
+    if (typeof bt !== 'string' || bt.length === 0 || bt === 'Enum') return undefined;
+    return bt;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Resolve the primitive base type for a D365FO EDT by walking the edt_metadata chain.
  * The `extends` column in edt_metadata stores either a primitive type name
  * (String, Real, Int64, Date, UtcDateTime, Enum, Container, Guid, Integer) or
  * another EDT name. We follow the chain until we reach a primitive type.
  *
+ * ⚠️ Index limitation: ROOT EDTs that extend a primitive store extends=null, so this
+ * cannot tell a Date/Real root EDT from a String one and defaults such cases to
+ * String. Prefer bridgeEdtBaseType() when a bridge is available; this is the
+ * offline (Azure/Linux) fallback.
+ *
  * Returns a base type string compatible with fieldTypeToAxType(), e.g.:
  *   "Qty" → "Real", "TransDate" → "Date", "ItemId" → "String"
  */
-function resolveEdtBaseType(edtName: string, db: any, depth = 0): string {
+export function resolveEdtBaseType(edtName: string, db: any, depth = 0): string | undefined {
   // D365FO primitive types − these map directly to AxTableField types
   const PRIMITIVES = new Set([
     'String', 'Integer', 'Int64', 'Real', 'Date', 'UtcDateTime', 'DateTime',
@@ -991,19 +1052,65 @@ function resolveEdtBaseType(edtName: string, db: any, depth = 0): string {
 
   try {
     const row = db.prepare(
-      `SELECT extends, enum_type FROM edt_metadata WHERE edt_name = ? LIMIT 1`
-    ).get(edtName) as { extends: string | null; enum_type: string | null } | undefined;
+      `SELECT extends, enum_type, string_size FROM edt_metadata WHERE edt_name = ? LIMIT 1`
+    ).get(edtName) as { extends: string | null; enum_type: string | null; string_size: string | number | null } | undefined;
 
-    if (!row) return 'String';
+    // EDT not found in the index (e.g. a custom EDT not yet indexed, or a standard OOB EDT
+    // whose index wasn't loaded). Return undefined so callers fall back to EDT-name heuristics
+    // in getAxTableFieldType() instead of blindly defaulting to AxTableFieldString.
+    if (!row) return undefined;
     // Enum-based EDT: extends is null but enum_type is set (e.g. SalesStatus, PurchStatus)
     if (row.enum_type && !row.extends) return 'Enum';
-    if (!row.extends) return 'String';
+    if (!row.extends) {
+      // ROOT EDT: the index does NOT record the primitive (AxEdtDate/Real/Int64/String all
+      // store extends=null). A real string EDT carries a string_size; without one we genuinely
+      // CANNOT tell String from Date/Real/Int64 — so return undefined and let the caller's
+      // name heuristic (or the bridge) decide, instead of mislabeling e.g. TransDate/Qty as
+      // String. This is the #1 "scaffold turned my date/amount field into a string" bug.
+      return row.string_size != null ? 'String' : undefined;
+    }
     if (PRIMITIVES.has(row.extends)) return row.extends;
 
     // Follow chain to the parent EDT
     return resolveEdtBaseType(row.extends, db, depth + 1);
   } catch {
-    return 'String';
+    return undefined;
+  }
+}
+
+/**
+ * Heuristic base type from an EDT/field name when the EDT is not in the index
+ * (e.g. a standard EDT whose edt_metadata wasn't loaded, or a same-session EDT).
+ * Mirrors SmartXmlBuilder.getAxTableFieldType's name heuristics but returns the
+ * primitive base type so it can be passed explicitly to the C# bridge (which
+ * otherwise defaults unknown EDTs to AxTableFieldString).
+ * Returns undefined for genuinely unrecognizable names (caller keeps EDT-as-string).
+ */
+export function heuristicEdtBaseType(edtName: string): string | undefined {
+  const e = edtName.toLowerCase();
+  if (e === 'recid' || e.endsWith('recid') || e.includes('refrecid')) return 'Int64';
+  if (e.includes('utcdatetime') || (e.includes('datetime') && !e.includes('transdate'))) return 'UtcDateTime';
+  if (e.includes('date') && !e.includes('time') && !e.includes('update')) return 'Date';
+  if (e.includes('amount') || e.includes('price') || e.includes('qty') || e.includes('quantity')
+      || e.includes('percent') || e.includes('rate') || e === 'real' || e.endsWith('mst')) return 'Real';
+  if ((e.endsWith('int') || e.includes('count') || e.includes('level'))
+      && !e.includes('account') && !e.includes('name')) return 'Integer';
+  return undefined;
+}
+
+/**
+ * Check whether a name refers to an indexed ENUM (not an EDT). Used to emit
+ * AxTableFieldEnum + EnumType instead of AxTableFieldString + ExtendedDataType
+ * for fields whose "EDT" is actually a base enum (e.g. a custom RentStatus enum).
+ */
+export function isEnumName(name: string, db: any): boolean {
+  try {
+    const row = db.prepare(
+      `SELECT 1 FROM symbols WHERE name = ? COLLATE NOCASE AND type IN ('enum', 'enum-extension') LIMIT 1`
+    ).get(name);
+    return !!row;
+  } catch {
+    return false;
   }
 }
 
@@ -1113,6 +1220,13 @@ export function resolveBestEdt(fieldName: string, db: any): string {
     if (acceptFuzzy && best && bestConf >= 0.8) return best;
 
     const heuristic = suggestEdtFromFieldName(fieldName);
+    // If the heuristic only fell back to the generic String255, and the fieldName itself
+    // looks like a PascalCase custom EDT (starts uppercase, ≥5 chars, non-generic), return
+    // the fieldName directly — it's likely a custom EDT not yet in the index.
+    // The edtWarnings system will validate it later and warn if it truly doesn't exist.
+    if (heuristic === 'String255' && acceptFuzzy && /^[A-Z]/.test(fieldName) && fieldName.length >= 5) {
+      return fieldName;
+    }
     if (validateEdtExists(heuristic, db)) return heuristic;
 
     if (acceptFuzzy && best && bestConf >= 0.6) return best;

@@ -190,6 +190,16 @@ namespace D365MetadataBridge
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static Services.CrossReferenceService? InitCrossReferenceService()
         {
+            // Cross-references require the DYNAMICSXREFDB SQL database. This is an
+            // OPTIONAL capability — metadata read/write works fully without it. When
+            // no xref database is configured, skip silently instead of attempting a
+            // doomed SQL connection that otherwise logs an alarming [WARN] on every
+            // startup (the TS side forwards [WARN]/[ERROR] to the MCP client).
+            if (string.IsNullOrWhiteSpace(_xrefDatabase))
+            {
+                Log.WriteLine("[INFO] Cross-reference DB not configured — xref features disabled (metadata operations unaffected)");
+                return null;
+            }
             try
             {
                 Log.WriteLine($"[INFO] Initializing CrossReferenceProvider: {_xrefServer}\\{_xrefDatabase}");
@@ -199,7 +209,10 @@ namespace D365MetadataBridge
             }
             catch (Exception ex)
             {
-                Log.WriteLine($"[WARN] Failed to initialize CrossReferenceProvider: {ex.Message}");
+                // Optional capability — a SQL connection failure is not a server error.
+                // Log at [INFO] so it is not surfaced as a client-facing warning; the
+                // ready payload already reports xrefAvailable=false for callers that care.
+                Log.WriteLine($"[INFO] Cross-reference DB unavailable — xref features disabled ({ex.Message})");
                 return null;
             }
         }

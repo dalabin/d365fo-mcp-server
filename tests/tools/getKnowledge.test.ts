@@ -42,4 +42,22 @@ describe('get_knowledge kind inference', () => {
     await getKnowledgeTool(req({}));
     expect(xppKnowledgeTool).toHaveBeenCalledOnce();
   });
+
+  it('remaps query → topic for the knowledge handler', async () => {
+    await getKnowledgeTool(req({ query: 'X++ static variable lifetime' }));
+    expect(xppKnowledgeTool).toHaveBeenCalledOnce();
+    expect((xppKnowledgeTool as any).mock.calls[0][0].params.arguments).toMatchObject({
+      topic: 'X++ static variable lifetime',
+    });
+  });
+
+  it('remaps q / search aliases to topic too', async () => {
+    await getKnowledgeTool(req({ search: 'number sequences' }));
+    expect((xppKnowledgeTool as any).mock.calls[0][0].params.arguments).toMatchObject({ topic: 'number sequences' });
+  });
+
+  it('does not override an explicit topic with query', async () => {
+    await getKnowledgeTool(req({ topic: 'CoC', query: 'ignored' }));
+    expect((xppKnowledgeTool as any).mock.calls[0][0].params.arguments.topic).toBe('CoC');
+  });
 });

@@ -259,6 +259,20 @@ export class BridgeClient extends EventEmitter {
       // cannot corrupt the state of its successor.
       const child = this.process;
 
+      // Guard the child's stdio streams against unhandled 'error' events. When the
+      // bridge process dies mid-write (e.g. a crash during createSmartTable), Node
+      // can emit EPIPE/ECONNRESET on stdin/stdout/stderr. A stream that emits
+      // 'error' with no listener throws as an uncaughtException and would take the
+      // whole MCP server down ("crashes on the first request"). Recovery is driven
+      // by the 'error'/'exit' handlers on the child below; here we just absorb the
+      // stream-level noise so it never becomes fatal.
+      const onStreamError = (where: string) => (err: Error) => {
+        console.error(`[BridgeClient] ${where} stream error: ${err.message}`);
+      };
+      child.stdin?.on('error', onStreamError('stdin'));
+      child.stdout?.on('error', onStreamError('stdout'));
+      child.stderr?.on('error', onStreamError('stderr'));
+
       // Handle stdout — newline-delimited JSON
       child.stdout!.on('data', (chunk: Buffer) => {
         if (this.process !== child) return;
@@ -289,7 +303,16 @@ export class BridgeClient extends EventEmitter {
               this.pending.delete(msg.id);
               clearTimeout(pending.timer);
               if (msg.error) {
-                pending.reject(new Error(`Bridge error [${msg.error.code}]: ${msg.error.message}`));
+                // A read "object not found" (-32001 from the metadata read path) is a
+                // normal negative result, not an error — resolve null so read methods
+                // (typed T | null) return cleanly and callers don't log it as a failure.
+                // The write path's -32001 ("Write operation returned null") keeps a
+                // distinct message and still rejects.
+                if (msg.error.code === -32001 && /not found/i.test(msg.error.message ?? '')) {
+                  pending.resolve(null);
+                } else {
+                  pending.reject(new Error(`Bridge error [${msg.error.code}]: ${msg.error.message}`));
+                }
               } else {
                 pending.resolve(msg.result);
               }
@@ -329,9 +352,12 @@ export class BridgeClient extends EventEmitter {
 
       child.on('exit', (code, signal) => {
         if (this.process !== child) return;
+        clearTimeout(timeout);
         this._isReady = false;
         console.error(`[BridgeClient] Process exited: code=${code}, signal=${signal}`);
-        this.rejectAllPending(new Error(`Bridge process exited unexpectedly: code=${code}`));
+        const exitErr = new Error(`Bridge process exited before becoming ready: code=${code}, signal=${signal}`);
+        this.rejectAllPending(exitErr);
+        reject(exitErr);
       });
     });
   }

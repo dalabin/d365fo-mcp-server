@@ -45,7 +45,7 @@ namespace D365MetadataBridge.Services
             _referencePackagesPath = referencePackagesPath;
             // Use DiskProvider (standalone mode) — avoids .NET Framework EventDescriptor dependency
             var factory = new MetadataProviderFactory();
-            _provider = factory.CreateDiskProvider(packagesPath);
+            _provider = CreatePrimaryProvider(factory, packagesPath, referencePackagesPath);
             Console.Error.WriteLine($"[MetadataService] Initialized via DiskProvider: {packagesPath}");
 
             if (referencePackagesPath != null)
@@ -60,6 +60,42 @@ namespace D365MetadataBridge.Services
                     Console.Error.WriteLine($"[WARN] Failed to initialize reference DiskProvider at '{referencePackagesPath}': {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>
+        /// Builds the primary DiskProvider. When a reference (standard/Microsoft) packages
+        /// path is configured, the provider spans BOTH roots so that WRITE operations can
+        /// resolve a STANDARD base object — e.g. creating an extension of a standard enum.
+        /// A single-root provider over only the custom path cannot, which made
+        /// createObject(enum-extension of a standard base) throw "The given key was not
+        /// present in the dictionary".
+        ///
+        /// Defensive: if the multi-root configuration is unavailable on this platform the
+        /// method falls back to the single-path provider, so the working read path is never
+        /// regressed (worst case = prior behaviour).
+        /// </summary>
+        private static IMetadataProvider CreatePrimaryProvider(MetadataProviderFactory factory, string primaryPath, string? referencePath)
+        {
+            if (!string.IsNullOrEmpty(referencePath) && System.IO.Directory.Exists(referencePath))
+            {
+                try
+                {
+                    var config = new Microsoft.Dynamics.AX.Metadata.Storage.DiskProvider.DiskProviderConfiguration
+                    {
+                        MetadataPath = primaryPath,
+                        IncludeStatic = true,
+                    };
+                    config.AddMetadataPath(referencePath!);
+                    var combined = factory.CreateDiskProvider(config);
+                    Console.Error.WriteLine($"[MetadataService] DiskProvider spans 2 roots (writes can resolve standard bases): {primaryPath} + {referencePath}");
+                    return combined;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[WARN] Combined DiskProvider failed ({ex.Message}) — using single-path provider: {primaryPath}");
+                }
+            }
+            return factory.CreateDiskProvider(primaryPath);
         }
 
         /// <summary>
@@ -89,7 +125,7 @@ namespace D365MetadataBridge.Services
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var factory = new MetadataProviderFactory();
-            _provider = factory.CreateDiskProvider(_packagesPath);
+            _provider = CreatePrimaryProvider(factory, _packagesPath, _referencePackagesPath);
             OnProviderRefreshed?.Invoke(_provider);
             sw.Stop();
             Console.Error.WriteLine($"[MetadataService] Provider refreshed in {sw.ElapsedMilliseconds}ms");
@@ -139,12 +175,46 @@ namespace D365MetadataBridge.Services
                         if (!_provider.Queries.Exists(objectName)) return new { valid = false, reason = $"Query '{objectName}' not found by IMetadataProvider after refresh" };
                         return new { valid = true, objectType, objectName };
 
+                    case "view":
+                        if (!_provider.Views.Exists(objectName)) return new { valid = false, reason = $"View '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
                     case "report":
                         if (!_provider.Reports.Exists(objectName)) return new { valid = false, reason = $"Report '{objectName}' not found by IMetadataProvider after refresh" };
                         return new { valid = true, objectType, objectName };
 
+                    case "menu":
+                        if (!_provider.Menus.Exists(objectName)) return new { valid = false, reason = $"Menu '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "menu-item-display":
+                        if (!_provider.MenuItemDisplays.Exists(objectName)) return new { valid = false, reason = $"MenuItemDisplay '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "menu-item-action":
+                        if (!_provider.MenuItemActions.Exists(objectName)) return new { valid = false, reason = $"MenuItemAction '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "menu-item-output":
+                        if (!_provider.MenuItemOutputs.Exists(objectName)) return new { valid = false, reason = $"MenuItemOutput '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "security-privilege":
+                        if (!_provider.SecurityPrivileges.Exists(objectName)) return new { valid = false, reason = $"SecurityPrivilege '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "security-duty":
+                        if (!_provider.SecurityDuties.Exists(objectName)) return new { valid = false, reason = $"SecurityDuty '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
+                    case "security-role":
+                        if (!_provider.SecurityRoles.Exists(objectName)) return new { valid = false, reason = $"SecurityRole '{objectName}' not found by IMetadataProvider after refresh" };
+                        return new { valid = true, objectType, objectName };
+
                     default:
-                        return new { valid = false, reason = $"Unsupported objectType for validation: {objectType}" };
+                        // Types the bridge can't read back yet (label, resource, tile, kpi, …):
+                        // not an error — the file was already written. Caller logs this at debug.
+                        return new { valid = false, reason = $"validation-unsupported: {objectType}" };
                 }
             }
             catch (Exception ex)

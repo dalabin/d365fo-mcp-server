@@ -1641,4 +1641,13 @@ describe('labels dispatcher: action aliases + errors', () => {
     }
     expect(r.content?.[0]?.text ?? '').not.toContain('invalid arguments');
   });
+
+  it('aliases search param searchText → query (does not fail as missing query)', async () => {
+    const r: any = await labelsTool(
+      { method: 'tools/call', params: { name: 'labels', arguments: { action: 'search', searchText: 'customer' } } } as CallToolRequest,
+      ctx,
+    );
+    // searchText is mapped to query, so the search runs instead of failing validation.
+    expect(r.content?.[0]?.text ?? '').not.toMatch(/expected string, received undefined|missing|required/i);
+  });
 });

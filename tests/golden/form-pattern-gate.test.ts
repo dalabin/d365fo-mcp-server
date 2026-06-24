@@ -177,7 +177,7 @@ describe('form pattern gate in create_d365fo_file', () => {
     const result = await handleCreateD365File(createReq({
       objectType: 'form',
       objectName: 'RentEquipment',
-      properties: { formTemplate: 'SimpleList', dataSource: 'AslRentEquipment', caption: 'Rent Equipment' },
+      properties: { formTemplate: 'SimpleList', dataSource: 'ContosoRentEquipment', caption: 'Rent Equipment' },
       modelName: 'ContosoExt',
       addToProject: false,
     }));

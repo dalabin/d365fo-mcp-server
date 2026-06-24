@@ -51,6 +51,12 @@ const objectFolderMap: Record<string, string> = {
   'security-role':                'AxSecurityRole',
 };
 
+// Reverse of objectFolderMap: AOT folder name (lowercased) → object type. Used to
+// derive objects from a project's Content Includes in verify-all mode.
+const folderToObjectType: Record<string, string> = Object.fromEntries(
+  Object.entries(objectFolderMap).map(([type, folder]) => [folder.toLowerCase(), type])
+);
+
 const VerifyD365ProjectArgsSchema = z.object({
   objects: z
     .array(
@@ -59,7 +65,8 @@ const VerifyD365ProjectArgsSchema = z.object({
         objectName: z.string().describe('Name of the object'),
       })
     )
-    .describe('List of objects to verify'),
+    .optional()
+    .describe('List of objects to verify. Omit to verify every object referenced in the project.'),
   projectPath: z
     .string()
     .optional()
@@ -111,6 +118,10 @@ export async function verifyD365ProjectTool(
     const configPackagePath = configManager.getPackagePath();
     const envType = await configManager.getDevEnvironmentType();
     const configModelName = configManager.getModelName();
+    // Resolve a project path from args or config — needed for the project-reference
+    // check, for model-name derivation, and (in verify-all mode) to enumerate objects.
+    const resolvedProjectPath =
+      args.projectPath || (await configManager.getProjectPath()) || undefined;
 
     // Derive model name — priority:
     //   1) Explicit args.modelName
@@ -119,12 +130,12 @@ export async function verifyD365ProjectTool(
     let actualModelName: string =
       args.modelName ||
       configModelName ||
-      (args.projectPath ? path.basename(args.projectPath, path.extname(args.projectPath)) : '') ||
+      (resolvedProjectPath ? path.basename(resolvedProjectPath, path.extname(resolvedProjectPath)) : '') ||
       'UnknownModel';
     const modelDetectedFrom =
       args.modelName          ? 'argument'    :
       configModelName         ? 'mcp.json'    :
-      args.projectPath        ? 'projectPath' :
+      resolvedProjectPath     ? 'projectPath' :
                                 'none';
 
     let basePath: string;
@@ -159,11 +170,53 @@ export async function verifyD365ProjectTool(
     // ── Load project includes (optional) ─────────────────────────────────────
     let projectIncludes: Set<string> | null = null;
     let projectLoadError: string | null = null;
-    if (args.projectPath) {
+    if (resolvedProjectPath) {
       try {
-        projectIncludes = await readProjectIncludes(args.projectPath);
+        projectIncludes = await readProjectIncludes(resolvedProjectPath);
       } catch (e: any) {
         projectLoadError = e.message;
+      }
+    }
+
+    // ── Resolve the object list ──────────────────────────────────────────────
+    // verify-all mode: when no objects are supplied, derive them from the project's
+    // Content Includes (e.g. "AxClass\MyClass" → { class, MyClass }).
+    type VerifyObject = { objectType: (typeof OBJECT_TYPES)[number]; objectName: string };
+    const objectsToVerify: VerifyObject[] = args.objects ? [...args.objects] : [];
+    if (objectsToVerify.length === 0) {
+      if (!projectIncludes) {
+        return {
+          content: [{
+            type: 'text',
+            text:
+              '❌ No `objects` supplied and no project could be read to verify them all.\n\n' +
+              'Either pass `objects` explicitly, or provide `projectPath` (or configure projectPath ' +
+              'in .mcp.json / auto-detect) so every object referenced in the .rnrproj can be checked.' +
+              (projectLoadError ? `\n\n⚠️ Project read error: ${projectLoadError}` : ''),
+          }],
+          isError: true,
+        };
+      }
+      for (const inc of projectIncludes) {
+        const sep = inc.includes('\\') ? '\\' : '/';
+        const parts = inc.split(sep);
+        if (parts.length < 2) continue;
+        const folder = parts[0];
+        const name = parts[parts.length - 1].replace(/\.xml$/i, '');
+        const objType = folderToObjectType[folder.toLowerCase()];
+        if (objType && name) {
+          objectsToVerify.push({ objectType: objType as (typeof OBJECT_TYPES)[number], objectName: name });
+        }
+      }
+      if (objectsToVerify.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text:
+              `ℹ️ The project at \`${resolvedProjectPath}\` has no recognizable object references to verify ` +
+              `(no Content Includes mapped to a known AOT folder).`,
+          }],
+        };
       }
     }
 
@@ -180,7 +233,7 @@ export async function verifyD365ProjectTool(
 
     const results: ObjectResult[] = [];
 
-    for (const obj of args.objects) {
+    for (const obj of objectsToVerify) {
       const axFolder = objectFolderMap[obj.objectType] ?? 'AxClass';
       const filePath = path.join(basePath, resolvedPackageName, actualModelName, axFolder, `${obj.objectName}.xml`);
 
