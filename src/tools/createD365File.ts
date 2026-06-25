@@ -15,10 +15,12 @@ import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../utils
 import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
 import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject, bridgeRefreshProvider } from '../bridge/index.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
-import { gateOnFormPatternErrors } from './validateFormPattern.js';
+import { gateOnFormPatternErrors, isFormPatternEnforceEnabled } from './validateFormPattern.js';
+import { validateFormExtensionControlShape, buildFormExtensionShapeError } from '../utils/formExtensionShapeValidator.js';
 import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
+import { buildAxSecurityPrivilegeXml } from './securityPrivilegeXml.js';
 
 /**
  * Per-project-file mutex to serialise concurrent addToProject calls.
@@ -224,6 +226,36 @@ function fieldTypeToAxType(fieldType: string, edtName?: string): string {
   }
 
   return 'AxTableFieldString';
+}
+
+/**
+ * Normalize the flexible field specs accepted by the tool / XML generators
+ * (`{ name, edt?, type?, fieldType?, enumType?, mandatory?, label? }`) into the
+ * key shape the C# bridge's WriteFieldParam expects
+ * (`{ name, fieldType, extendedDataType, enumType, mandatory, label }`).
+ *
+ * Without this, fields handed to the bridge as `{ edt, type }` silently lose their
+ * EDT and base type — the bridge sees FieldType="" and creates a bare String field
+ * with no ExtendedDataType. `fieldType` may arrive either as a base-type keyword
+ * ("Integer") or as a full i:type ("AxTableFieldInt"); the latter is stripped back
+ * to the keyword the bridge's CreateTableField switch understands.
+ */
+export function normalizeFieldSpecsForBridge(
+  fields: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return fields.map((f) => {
+    let fieldType = f.type ?? f.fieldType;
+    if (typeof fieldType === 'string') fieldType = fieldType.replace(/^AxTableField/, '');
+    const out: Record<string, unknown> = { name: f.name };
+    if (fieldType != null && fieldType !== '') out.fieldType = fieldType;
+    if (f.edt != null) out.extendedDataType = f.edt;
+    else if (f.extendedDataType != null) out.extendedDataType = f.extendedDataType;
+    if (f.enumType != null) out.enumType = f.enumType;
+    if (f.mandatory != null) out.mandatory = f.mandatory;
+    if (f.label != null) out.label = f.label;
+    if (f.stringSize != null) out.stringSize = f.stringSize;
+    return out;
+  });
 }
 
 /**
@@ -2577,36 +2609,12 @@ ${relationsXml}
   }
 
   /**
-   * Generate AxSecurityPrivilege XML.
-   * properties.targetObject  – ObjectName of the target menu item (optional)
-   * properties.objectType    – MenuItemDisplay | MenuItemAction | MenuItemOutput (default: MenuItemDisplay)
-   * properties.accessLevel   – 'view' | 'maintain' | 'read' (default: 'view' = Read only)
+   * Generate AxSecurityPrivilege XML. Delegates to the shared builder so this
+   * mirror and the one in generateD365Xml.ts cannot drift.
+   * @see buildAxSecurityPrivilegeXml for the property contract and element order.
    */
   static generateAxSecurityPrivilegeXml(name: string, properties?: Record<string, any>): string {
-    const label = properties?.label || '@TODO:LabelId';
-    const targetObject: string | undefined = properties?.targetObject;
-    const objType: string = properties?.objectType || 'MenuItemDisplay';
-
-    let entryPointsXml: string;
-    if (targetObject) {
-      const al = (properties?.accessLevel || 'view').toLowerCase();
-      const grantXml = al === 'maintain'
-        ? '\t\t\t\t<Read>Allow</Read>\n\t\t\t\t<Update>Allow</Update>\n\t\t\t\t<Create>Allow</Create>\n\t\t\t\t<Delete>Allow</Delete>'
-        : '\t\t\t\t<Read>Allow</Read>';
-      entryPointsXml = `\n\t\t<AxSecurityEntryPointReference>\n\t\t\t<Name>${targetObject}</Name>\n\t\t\t<Grant>\n${grantXml}\n\t\t\t</Grant>\n\t\t\t<ObjectName>${targetObject}</ObjectName>\n\t\t\t<ObjectType>${objType}</ObjectType>\n\t\t\t<Forms />\n\t\t</AxSecurityEntryPointReference>\n\t`;
-    } else {
-      entryPointsXml = '';
-    }
-
-    return `<?xml version="1.0" encoding="utf-8"?>
-<AxSecurityPrivilege xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
-\t<Name>${name}</Name>
-\t<Label>${label}</Label>
-\t<DataEntityPermissions />
-\t<DirectAccessPermissions />
-\t<EntryPoints>${entryPointsXml}</EntryPoints>
-\t<FormControlOverrides />
-</AxSecurityPrivilege>`;
+    return buildAxSecurityPrivilegeXml(name, properties);
   }
 
   /**
@@ -3938,10 +3946,14 @@ export async function handleCreateD365File(
           bridgeParams.methods = parsed.methods;
         }
 
-        // For tables: pass fields, fieldGroups, indexes, relations from properties
-        if (args.objectType === 'table' && args.properties) {
+        // For tables AND table-extensions: pass fields, fieldGroups, indexes, relations
+        // from properties. (Previously only 'table' was handled, so a table-extension's
+        // properties.fields were silently dropped and the file got an empty <Fields />.)
+        // Field specs are normalized to the bridge's WriteFieldParam key shape so that
+        // `{ edt, type }` keys are not lost — otherwise every field becomes a bare String.
+        if ((args.objectType === 'table' || args.objectType === 'table-extension') && args.properties) {
           const props = args.properties as Record<string, unknown>;
-          if (props.fields) bridgeParams.fields = props.fields as Record<string, unknown>[];
+          if (props.fields) bridgeParams.fields = normalizeFieldSpecsForBridge(props.fields as Record<string, unknown>[]);
           if (props.fieldGroups) bridgeParams.fieldGroups = props.fieldGroups as Record<string, unknown>[];
           if (props.indexes) bridgeParams.indexes = props.indexes as Record<string, unknown>[];
           if (props.relations) bridgeParams.relations = props.relations as Record<string, unknown>[];
@@ -4134,6 +4146,22 @@ export async function handleCreateD365File(
       }
       if (gate.warningsText) {
         formPatternWarnings = `\n${gate.warningsText}\n`;
+      }
+    }
+
+    // Form-extension control-shape gate: reject the malformed control shapes an AI
+    // tends to hand-write (<AxFormControlExtension>, <ParentControlName>,
+    // <FormControlExtension> wrapping the control, AxFormIntControl) — they pass XML
+    // well-formedness but the D365FO deserializer rejects them. Blocks when
+    // FORM_PATTERN_ENFORCE is on (default), else appends a warning.
+    if (args.objectType === 'form-extension' && args.xmlContent) {
+      const shapeProblems = validateFormExtensionControlShape(xmlContent);
+      if (shapeProblems.length > 0) {
+        const shapeError = buildFormExtensionShapeError(finalObjectName, shapeProblems);
+        if (isFormPatternEnforceEnabled()) {
+          return { content: [{ type: 'text', text: shapeError }], isError: true };
+        }
+        formPatternWarnings += `\n⚠️ ${shapeError}\n`;
       }
     }
 

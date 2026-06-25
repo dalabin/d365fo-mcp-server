@@ -13,6 +13,14 @@ import { modifyD365FileTool, countTopLevelMethodBodies, splitTopLevelMethodBodie
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
+const { mockBridgeReplaceAllFields } = vi.hoisted(() => ({
+  mockBridgeReplaceAllFields: vi.fn(async () => ({
+    success: true,
+    message: '✅ Fields replaced',
+    fieldsAdded: 1,
+  })),
+}));
+
 // Mock filesystem — file tools write to disk
 vi.mock('fs/promises', () => ({
   readFile: vi.fn(async (p: string) => {
@@ -34,6 +42,15 @@ vi.mock('fs/promises', () => ({
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false, size: 1024 })),
   readdir: vi.fn(async () => []),
 }));
+
+vi.mock('../../src/bridge/bridgeAdapter', async (orig) => {
+  const actual = await orig<typeof import('../../src/bridge/bridgeAdapter')>();
+  return {
+    ...actual,
+    bridgeReplaceAllFields: mockBridgeReplaceAllFields,
+    bridgeValidateAfterWrite: vi.fn(async () => null),
+  };
+});
 
 vi.mock('../../src/utils/configManager', () => ({
   getConfigManager: vi.fn(() => ({
@@ -335,7 +352,7 @@ describe('verify_d365fo_project', () => {
     const result = await verifyD365ProjectTool(
       req('verify_d365fo_project', {
         objects: [{ objectType: 'class', objectName: 'MyHelper' }],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -356,7 +373,7 @@ describe('verify_d365fo_project', () => {
     const result = await verifyD365ProjectTool(
       req('verify_d365fo_project', {
         objects: [{ objectType: 'class', objectName: 'MissingClass' }],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -386,7 +403,7 @@ describe('verify_d365fo_project', () => {
           { objectType: 'table', objectName: 'MyTable' },
           { objectType: 'enum', objectName: 'MyEnum' },
         ],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -434,8 +451,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class',
         objectName: 'MyNewClass',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
@@ -450,14 +467,93 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'table-extension',
         objectName: 'CustTable.MY_Extension',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
     );
     // fs is fully mocked — writes succeed on all platforms.
     expect((result as any).isError).toBeFalsy();
+  });
+
+  it('table-extension create passes properties.fields to the bridge (normalized to WriteFieldParam keys)', async () => {
+    // Regression: the bridge create path only forwarded fields for objectType==='table',
+    // so a table-extension's properties.fields were dropped and the file got an empty
+    // <Fields />. Fields must be forwarded AND normalized ({ edt, type } → { extendedDataType, fieldType }).
+    const createObject = vi.fn(async () => ({
+      success: true,
+      filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTableExtension\\CustTable.MyExt.xml',
+      api: 'IMetaTableExtensionProvider.Create',
+    }));
+    const ctx = buildContext();
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, createObject, validateObject: vi.fn(async () => null) };
+
+    const result = await handleCreateD365File(
+      req('create_d365fo_file', {
+        objectType: 'table-extension',
+        objectName: 'CustTable.MyExt',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
+        packagePath: 'K:\\PackagesLocalDirectory',
+        addToProject: false,
+        properties: {
+          fields: [
+            { name: 'LookAheadMonths', edt: 'BudgetNumberOfPeriods', type: 'Integer' },
+            { name: 'LookBackMonths', edt: 'BudgetNumberOfPeriods', type: 'Integer' },
+          ],
+        },
+      }),
+      ctx,
+    );
+
+    expect((result as any).isError).toBeFalsy();
+    expect(createObject).toHaveBeenCalledTimes(1);
+    const sentParams = createObject.mock.calls[0][0];
+    expect(sentParams.objectType).toBe('table-extension');
+    expect(sentParams.fields).toEqual([
+      { name: 'LookAheadMonths', fieldType: 'Integer', extendedDataType: 'BudgetNumberOfPeriods' },
+      { name: 'LookBackMonths', fieldType: 'Integer', extendedDataType: 'BudgetNumberOfPeriods' },
+    ]);
+  });
+
+  it('blocks form-extension create when xmlContent uses the malformed control shape', async () => {
+    // Guard: the deserializer-rejecting shape an AI tends to hand-write
+    // (AxFormControlExtension / ParentControlName / FormControlExtension-wrapping / AxFormIntControl)
+    // must be caught at write time with the correct template — not silently written.
+    const malformed =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxFormExtension xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">\n` +
+      `\t<Name>BudgetControlConfiguration.MyExt</Name>\n` +
+      `\t<Controls>\n` +
+      `\t\t<AxFormControlExtension>\n` +
+      `\t\t\t<Name>X</Name>\n` +
+      `\t\t\t<ParentControlName>Tab</ParentControlName>\n` +
+      `\t\t\t<FormControlExtension>\n` +
+      `\t\t\t\t<AxFormIntControl><Name>X</Name></AxFormIntControl>\n` +
+      `\t\t\t</FormControlExtension>\n` +
+      `\t\t</AxFormControlExtension>\n` +
+      `\t</Controls>\n` +
+      `</AxFormExtension>`;
+
+    const result = await handleCreateD365File(
+      req('create_d365fo_file', {
+        objectType: 'form-extension',
+        objectName: 'BudgetControlConfiguration.MyExt',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
+        packagePath: 'K:\\PackagesLocalDirectory',
+        addToProject: false,
+        overwrite: true,
+        xmlContent: malformed,
+      }),
+    );
+
+    expect((result as any).isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toMatch(/AxFormExtensionControl xmlns=""/);   // correct wrapper shown
+    expect(text).toMatch(/AxFormIntegerControl/);              // correct integer element shown
+    expect(text).toMatch(/<Parent>/);                          // correct parent element shown
   });
 
   it('auto-converts bare extension name to dot-notation (Case C fix)', async () => {
@@ -468,18 +564,18 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'table-extension',
         objectName: 'PurchTable',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
     );
     // fs is fully mocked — writes succeed on all platforms.
     // We inspect the path embedded in the message: it must use dot-notation
-    // (PurchTable.<something>Extension.xml) and NOT a flat prefix (FmMcpPurchTable.xml).
+    // (PurchTable.<something>Extension.xml) and NOT a flat prefix (MyModelPurchTable.xml).
     const text: string = result.content[0].text;
     expect(text).toMatch(/PurchTable[.][^/\\]*[Ee]xtension/);
-    expect(text).not.toMatch(/FmMcpPurchTable|[A-Za-z]+PurchTable\.xml/);
+    expect(text).not.toMatch(/MyModelPurchTable|[A-Za-z]+PurchTable\.xml/);
   });
 
   it('auto-converts bare class-extension name to _Extension form (Case D fix)', async () => {
@@ -495,8 +591,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class-extension',
         objectName: 'SalesFormLetter',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
@@ -550,8 +646,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class',
         objectName: 'MyHybridClass',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         xmlContent: xml,
         addToProject: false,
@@ -563,13 +659,13 @@ describe('create_d365fo_file', () => {
 
   it('returns error when objectType is missing', async () => {
     await expect(
-      handleCreateD365File(req('create_d365fo_file', { objectName: 'Foo', modelName: 'MyModel' })),
+      handleCreateD365File(req('create_d365fo_file', { objectName: 'Foo', modelName: 'Contoso' })),
     ).rejects.toThrow();
   });
 
   it('returns error when objectName is missing', async () => {
     await expect(
-      handleCreateD365File(req('create_d365fo_file', { objectType: 'class', modelName: 'MyModel' })),
+      handleCreateD365File(req('create_d365fo_file', { objectType: 'class', modelName: 'Contoso' })),
     ).rejects.toThrow();
   });
 });
@@ -918,7 +1014,7 @@ describe('modify_d365fo_file', () => {
           operation: 'add-index',
           indexName: 'ContosoRentEquipmentIdx',
           indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
-          modelName: 'MyModel',
+          modelName: 'Contoso',
         }),
         ctx,
       );
@@ -986,22 +1082,22 @@ describe('modify_d365fo_file', () => {
     // skipped and only the actual methods are added.
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxClass><Name>AslRentAgreementTable_Extension</Name></AxClass>`,
+      `<?xml version="1.0"?><AxClass><Name>ContosoRentAgreementTable_Extension</Name></AxClass>`,
     );
     const addMethod = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
     (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMethod, refreshProvider: vi.fn(), validateObject: vi.fn(async () => null) };
 
-    const classDecl = `[ExtensionOf(tableStr(AslRentAgreementTable))]\nfinal class AslRentAgreementTable_Extension\n{\n}`;
+    const classDecl = `[ExtensionOf(tableStr(ContosoRentAgreementTable))]\nfinal class ContosoRentAgreementTable_Extension\n{\n}`;
     const method1  = `public void validateStatus()\n{\n    // TODO\n}`;
     const method2  = `public void computeTotals()\n{\n    // TODO\n}`;
 
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentAgreementTable_Extension',
+        objectName: 'ContosoRentAgreementTable_Extension',
         operation: 'add-method',
         sourceCode: `${classDecl}\n\n${method1}\n\n${method2}`,
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxClass\\AslRentAgreementTable_Extension.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxClass\\ContosoRentAgreementTable_Extension.xml',
       }),
       ctx,
     );
@@ -1196,6 +1292,99 @@ describe('modify_d365fo_file', () => {
     expect(writtenContent).toContain('<MenuItemType>Display</MenuItemType>');
   });
 
+  it('add-control on a form-extension falls back to XML when the bridge fails (extension never resolves as a form)', async () => {
+    // Root cause: the C# bridge's AddControl reads _provider.Forms.Read(name), which
+    // can never resolve a form EXTENSION ("Base.Suffix") — it always reports
+    // 'Form "<ext>" not found'. The XML fallback must write the control element.
+    const fsMod = await import('fs/promises');
+    const extXml =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxFormExtension xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">\n` +
+      `\t<Name>ContosoRentConfiguration.MyExt</Name>\n` +
+      `\t<ControlModifications />\n` +
+      `\t<Controls />\n` +
+      `\t<DataSourceModifications />\n` +
+      `\t<PropertyModifications />\n` +
+      `</AxFormExtension>`;
+    (fsMod.readFile as any).mockResolvedValue(extXml);
+
+    const addControl = vi.fn(async () => {
+      throw new Error("Form 'ContosoRentConfiguration.MyExt' not found");
+    });
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addControl, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'form-extension',
+        objectName: 'ContosoRentConfiguration.MyExt',
+        operation: 'add-control',
+        controlName: 'ContosoPaymentReference',
+        parentControl: 'DetailsPropertiesFastTabPage',
+        controlType: 'String',
+        controlDataSource: 'ContosoRentRule',
+        controlDataField: 'ContosoPaymentReference',
+        controlLabel: '@ContosoLabels:PaymentReference',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxFormExtension\\ContosoRentConfiguration.MyExt.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    // Bridge was attempted first (and failed), XML fallback wrote the file.
+    expect(addControl).toHaveBeenCalledTimes(1);
+    const written = (fsMod.writeFile as any).mock.calls.find((c: any[]) =>
+      String(c[0]).includes('ContosoRentConfiguration.MyExt.xml'),
+    );
+    expect(written).toBeDefined();
+    const writtenContent: string = written[1];
+    // Must match the SDK-serialized shape: <AxFormExtensionControl xmlns=""> wrapping
+    // an empty-namespace <FormControl i:type="…"> with a <Parent> reference.
+    expect(writtenContent).toContain('<AxFormExtensionControl xmlns="">');
+    expect(writtenContent).toContain('<FormControl xmlns="" i:type="AxFormStringControl">');
+    expect(writtenContent).toContain('<Type>String</Type>');
+    expect(writtenContent).toContain('<Parent>DetailsPropertiesFastTabPage</Parent>');
+    expect(writtenContent).toContain('ContosoPaymentReference');
+    expect(writtenContent).toContain('<DataSource>ContosoRentRule</DataSource>');
+    // Must NOT use the malformed AxFormControlExtension/ParentControlName shape.
+    expect(writtenContent).not.toContain('<AxFormControlExtension>');
+    expect(writtenContent).not.toContain('ParentControlName');
+  });
+
+  it('add-control maps controlType to the matching AxForm*Control element (Integer → AxFormIntegerControl)', async () => {
+    const fsMod = await import('fs/promises');
+    const extXml =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxFormExtension xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">\n` +
+      `\t<Name>SomeForm.MyExt</Name>\n` +
+      `\t<Controls />\n` +
+      `</AxFormExtension>`;
+    (fsMod.readFile as any).mockResolvedValue(extXml);
+
+    const addControl = vi.fn(async () => ({ success: false }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addControl, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'form-extension',
+        objectName: 'SomeForm.MyExt',
+        operation: 'add-control',
+        controlName: 'MyCount',
+        parentControl: 'TabGeneral',
+        controlType: 'Integer',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxFormExtension\\SomeForm.MyExt.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const written = (fsMod.writeFile as any).mock.calls.find((c: any[]) =>
+      String(c[0]).includes('SomeForm.MyExt.xml'),
+    );
+    expect(written).toBeDefined();
+    expect(written[1]).toContain('<FormControl xmlns="" i:type="AxFormIntegerControl">');
+    expect(written[1]).toContain('<Type>Integer</Type>');
+  });
+
   it('replace-code "oldCode not found" error includes a tip to use get_object_info or add-method', async () => {
     const fsMod = await import('fs/promises');
     // File exists but the oldCode snippet isn't in it (bridge also won't find it).
@@ -1225,5 +1414,128 @@ describe('modify_d365fo_file', () => {
     // Must surface the original error AND the add-method/get_object_info tip.
     expect(result.content[0].text).toMatch(/oldCode not found/i);
     expect(result.content[0].text).toMatch(/get_object_info|add-method/i);
+  });
+});
+
+// ─── replace-all-fields EDT base type resolution ──────────────────────────────
+
+describe('replace-all-fields EDT base type resolution', () => {
+  const TABLE_FILE_PATH = 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\MyTable.xml';
+
+  const buildBridgeContext = (dbGetImpl?: () => any): XppServerContext => {
+    const stmt = {
+      all: vi.fn(() => []),
+      get: dbGetImpl ? vi.fn(dbGetImpl) : vi.fn(() => undefined),
+      run: vi.fn(),
+    };
+    return {
+      symbolIndex: {
+        searchSymbols: vi.fn(() => []),
+        getSymbolByName: vi.fn(() => undefined),
+        getCustomModels: vi.fn(() => ['MyModel']),
+        db: { prepare: vi.fn(() => stmt), stmt },
+        getReadDb: vi.fn(function (this: any) { return this.db; }),
+      } as any,
+      parser: {} as any,
+      cache: {
+        get: vi.fn(async () => null),
+        set: vi.fn(async () => {}),
+        generateSearchKey: vi.fn((q: string) => `k:${q}`),
+      } as any,
+      workspaceScanner: {} as any,
+      hybridSearch: {} as any,
+      bridge: { isReady: true, metadataAvailable: true } as any,
+    };
+  };
+
+  beforeEach(async () => {
+    mockBridgeReplaceAllFields.mockClear();
+    // Override readFile for table XML (module-level mock returns class XML by default)
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValue(
+      `<?xml version="1.0" encoding="utf-8"?><AxTable><Name>MyTable</Name><Fields /></AxTable>`,
+    );
+  });
+
+  it('resolves EDT base type and passes it to bridgeReplaceAllFields when type is omitted', async () => {
+    let callCount = 0;
+    const ctx = buildBridgeContext(() => {
+      callCount++;
+      if (callCount === 1) return { extends: 'Real', enum_type: null }; // AmountCur row
+      return undefined; // Real is a primitive — not in edt_metadata
+    });
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'MyTable',
+        operation: 'replace-all-fields',
+        filePath: TABLE_FILE_PATH,
+        fields: [{ name: 'Amount', edt: 'AmountCur' }],
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(mockBridgeReplaceAllFields).toHaveBeenCalledTimes(1);
+    const passedFields = mockBridgeReplaceAllFields.mock.calls[0][2] as any[];
+    expect(passedFields[0]).toMatchObject({ name: 'Amount', edt: 'AmountCur', type: 'Real' });
+  });
+
+  it('leaves type unchanged when caller already provides it', async () => {
+    const ctx = buildBridgeContext();
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'MyTable',
+        operation: 'replace-all-fields',
+        filePath: TABLE_FILE_PATH,
+        fields: [{ name: 'Amount', edt: 'AmountCur', type: 'Real' }],
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const passedFields = mockBridgeReplaceAllFields.mock.calls[0][2] as any[];
+    expect(passedFields[0]).toMatchObject({ name: 'Amount', edt: 'AmountCur', type: 'Real' });
+  });
+
+  it('resolves Enum type via enum_type flag in edt_metadata', async () => {
+    const ctx = buildBridgeContext(() => ({ extends: null, enum_type: 'MyStatusEnum' }));
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'MyTable',
+        operation: 'replace-all-fields',
+        filePath: TABLE_FILE_PATH,
+        fields: [{ name: 'Status', edt: 'MyStatusEnum' }],
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const passedFields = mockBridgeReplaceAllFields.mock.calls[0][2] as any[];
+    expect(passedFields[0]).toMatchObject({ name: 'Status', edt: 'MyStatusEnum', type: 'Enum' });
+  });
+
+  it('falls back to edt name when EDT is not in symbol index', async () => {
+    const ctx = buildBridgeContext(() => undefined);
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'MyTable',
+        operation: 'replace-all-fields',
+        filePath: TABLE_FILE_PATH,
+        fields: [{ name: 'Qty', edt: 'InventQty' }],
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const passedFields = mockBridgeReplaceAllFields.mock.calls[0][2] as any[];
+    expect(passedFields[0]).toMatchObject({ name: 'Qty', edt: 'InventQty', type: 'InventQty' });
   });
 });

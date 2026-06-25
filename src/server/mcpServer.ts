@@ -575,11 +575,11 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               packagePath: {
                 type: 'string',
-                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory). Also used by [modify] to locate objects whose metadata lives outside the default PackagesLocalDirectory (e.g. a repo checkout). Note: bridge-backed modify operations resolve objects via the C# bridge\'s startup roots — if the model is outside them, set context.customPackagesPath / D365FO_CUSTOM_PACKAGES_PATH instead, or pass an explicit filePath.'
+                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory). [modify] also uses it to locate objects outside the default dir (e.g. a repo checkout); if the model is outside the bridge startup roots, set D365FO_CUSTOM_PACKAGES_PATH or pass filePath instead.'
               },
               sourceCode: {
                 type: 'string',
-                description: `X++ source code for the object.\n\nFOR CLASSES — the content is split into <Declaration> and <Methods> automatically:\n  • <Declaration> = class keyword line + ALL member variable declarations inside the outer { }\n  • <Methods>     = each method defined AFTER the closing } of the class header\n\nExample for a class with member variables and a method:\n  public class MyClass\n  {\n      int globalPackageNumber;\n      Qty totalExportedQty;\n  }\n  public void myMethod()\n  {\n      // body\n  }\n\nCRITICAL: member variables MUST be inside the class { } block — NOT after it.`
+                description: 'X++ source for the object. FOR CLASSES the content is auto-split: <Declaration> = the class line + ALL member variables inside the outer { }; <Methods> = each method AFTER the closing }. CRITICAL: member variables MUST sit inside the class { }, methods after it — never the reverse.'
               },
               properties: {
                 type: 'object',
@@ -592,11 +592,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                   '• table-extension: fields[{name,edt?,enumType?,label?,mandatory?,fieldType?}] — enum fields need fieldType:"AxTableFieldEnum" + enumType\n' +
                   '• edt: label, extends, edtType, stringSize\n' +
                   '• form: caption, formTemplate, dataSource\n' +
-                  '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain)\n' +
+                  '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain), dataEntity (data entity name → emits DataEntityPermissions grant for OData access)\n' +
                   '• security-duty: label, privileges[] (privilege names — array or comma-separated)\n' +
                   '• security-role: label, duties[] (duty names), privileges[] (privilege names)\n' +
-                  '• menu-item-*: label, object, objectType\n' +
-                  'Example: properties={"fields":[{"name":"ContosoStatus","enumType":"NoYes","fieldType":"AxTableFieldEnum","label":"@Contoso:Status"}]}'
+                  '• menu-item-*: label, object, objectType'
               },
               addToProject: {
                 type: 'boolean',
