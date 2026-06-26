@@ -47,8 +47,8 @@ namespace D365MetadataBridge.Services
         /// identity — the small ordinal Id AND the SequenceId. This matters because the
         /// model descriptor's &lt;Id&gt; element is actually the SequenceId (a large number);
         /// parsing it into ModelSaveInfo.Id while leaving SequenceId=0 makes
-        /// IMetadataProvider.Create() throw NullReferenceException. (Verified: fm-mcp manifest
-        /// Id=116 SequenceId=896000930 creates fine; descriptor-derived Id=896000930
+        /// IMetadataProvider.Create() throw NullReferenceException. (Verified: a custom model's
+        /// manifest Id=116 SequenceId=896000930 creates fine; descriptor-derived Id=896000930
         /// SequenceId=0 NREs.) The descriptor scan stays as a fallback for models the
         /// manifest does not enumerate (e.g. not yet built/registered).
         /// Caches results for repeated calls.

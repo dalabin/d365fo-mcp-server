@@ -199,10 +199,10 @@ describe('isEnumName (enum vs EDT detection)', () => {
   it('detects an indexed enum name', () => {
     // Regression for friction #2: an enum-backed field was created as
     // AxTableFieldString + EDT instead of AxTableFieldEnum.
-    expect(isEnumName('AslRentEquipmentStatus', enumDb(['AslRentEquipmentStatus']))).toBe(true);
+    expect(isEnumName('ContosoRentEquipmentStatus', enumDb(['ContosoRentEquipmentStatus']))).toBe(true);
   });
   it('returns false for a name that is not an indexed enum', () => {
-    expect(isEnumName('CustAccount', enumDb(['AslRentEquipmentStatus']))).toBe(false);
+    expect(isEnumName('CustAccount', enumDb(['ContosoRentEquipmentStatus']))).toBe(false);
   });
 });
 

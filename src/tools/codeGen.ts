@@ -948,14 +948,14 @@ public class ${name}DimensionController
 function numberSeqHandlerTemplate(name: string): string {
   return `/// <summary>
 /// Integrates number sequence auto-generation into the ${name} form.
-/// This class handles the NumberSequenceFormHandler setup in the form.
+/// This class handles the NumberSeqFormHandler setup in the form.
 /// Add init() call to form init(), and numSeqFormHandler reference to classDeclaration.
 /// </summary>
 // ── Step 1: Form classDeclaration ───────────────────────────────────────
 // [Form]
 // public class ${name}Form extends FormRun
 // {
-//     NumberSequenceFormHandler numSeqFormHandler;
+//     NumberSeqFormHandler numSeqFormHandler;
 // }
 
 // ── Step 2: Form init() ─────────────────────────────────────────────────
@@ -963,8 +963,8 @@ function numberSeqHandlerTemplate(name: string): string {
 // {
 //     super();
 //     // Hook number sequence handler to the ${name}Id field
-//     numSeqFormHandler = NumberSequenceFormHandler::newForm(
-//         ${name}Parameters::numRef${name}Id().NumberSequence,  // number sequence reference
+//     numSeqFormHandler = NumberSeqFormHandler::newForm(
+//         ${name}Parameters::numRef${name}Id().NumberSequenceId,  // number sequence reference (RefRecId)
 //         element,                                              // FormRun
 //         tableNum(${name}),                                    // table
 //         fieldNum(${name}, ${name}Id));                        // field to fill

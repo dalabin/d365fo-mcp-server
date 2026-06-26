@@ -36,6 +36,7 @@ import {
   isFormPatternEnforceEnabled,
 } from './validateFormPattern.js';
 import { validateEdtExtensionChange } from '../utils/edtExtensionValidator.js';
+import { lintXppSelect } from '../utils/xppSelectLint.js';
 
 /**
  * Decode the standard XML entities (&lt;, &gt;, &apos;, &quot;, &amp;) and normalise
@@ -342,6 +343,120 @@ async function directXmlAddMenuItemToMenu(
     };
   } catch (err) {
     console.error(`[modify_d365fo_file] directXmlAddMenuItemToMenu failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * controlType (as passed to add-control) → the form control element emitted inside
+ * a form-extension's <FormControl>, together with its <Type> value. Verified against
+ * shipped standard form extensions (e.g. InventItemSampling.AdvancedQualityManagement).
+ * NOTE: an integer control is `AxFormIntegerControl` (Type=Integer) — NOT
+ * `AxFormIntControl`. Unknown types fall back to String, which is always valid.
+ */
+const CONTROL_TYPE_TO_FORM_CONTROL: Record<string, { iType: string; typeValue: string }> = {
+  string:      { iType: 'AxFormStringControl',   typeValue: 'String' },
+  integer:     { iType: 'AxFormIntegerControl',  typeValue: 'Integer' },
+  int:         { iType: 'AxFormIntegerControl',  typeValue: 'Integer' },
+  int64:       { iType: 'AxFormInt64Control',    typeValue: 'Int64' },
+  real:        { iType: 'AxFormRealControl',     typeValue: 'Real' },
+  date:        { iType: 'AxFormDateControl',     typeValue: 'Date' },
+  datetime:    { iType: 'AxFormDateTimeControl', typeValue: 'DateTime' },
+  utcdatetime: { iType: 'AxFormDateTimeControl', typeValue: 'DateTime' },
+  time:        { iType: 'AxFormTimeControl',     typeValue: 'Time' },
+  guid:        { iType: 'AxFormGuidControl',     typeValue: 'Guid' },
+  checkbox:    { iType: 'AxFormCheckBoxControl', typeValue: 'CheckBox' },
+  combobox:    { iType: 'AxFormComboBoxControl', typeValue: 'ComboBox' },
+  button:      { iType: 'AxFormButtonControl',   typeValue: 'Button' },
+  group:       { iType: 'AxFormGroupControl',    typeValue: 'Group' },
+};
+const DEFAULT_FORM_CONTROL = { iType: 'AxFormStringControl', typeValue: 'String' };
+
+/** Random 9-char lowercase-alphanumeric suffix, matching the SDK's
+ *  `FormExtensionControl<rand>` wrapper-name convention (e.g. "fh5riowy1"). */
+function formExtensionControlName(): string {
+  let s = '';
+  while (s.length < 9) s += Math.random().toString(36).slice(2);
+  return `FormExtensionControl${s.slice(0, 9)}`;
+}
+
+/**
+ * Direct XML fallback for add-control on a form-extension.
+ *
+ * The C# bridge's AddControl resolves its target via _provider.Forms.Read(name),
+ * which can NEVER find a form EXTENSION (named "BaseForm.Suffix") — it always
+ * reports 'Form "<ext>" not found'. add-control on a form-extension therefore has
+ * no working bridge path at all (independent of metadata-root freshness). This
+ * writes an <AxFormExtensionControl> element straight into the extension's
+ * <Controls> collection, in the exact shape the D365FO SDK serializes (verified
+ * against shipped standard extensions): an empty-namespace <FormControl i:type="…">
+ * wrapped by <AxFormExtensionControl xmlns=""> with a <Parent> reference. It edits
+ * the file on disk, so it is unaffected by what the bridge has loaded.
+ */
+async function directXmlAddControl(
+  filePath: string,
+  controlName: string,
+  parentControl: string,
+  controlType: string,
+  dataSource?: string,
+  dataField?: string,
+  label?: string,
+): Promise<{ success: boolean; message: string } | null> {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    // Idempotency: a control with this Name already present → skip.
+    // (controlName is a D365 identifier, so a literal substring match is safe.)
+    if (content.includes(`<Name>${controlName}</Name>`)) {
+      return {
+        success: true,
+        message: `✅ Control '${controlName}' already present in ${filePath} — skipped (idempotent).`,
+      };
+    }
+
+    const { iType, typeValue } = CONTROL_TYPE_TO_FORM_CONTROL[(controlType || 'String').toLowerCase()] ?? DEFAULT_FORM_CONTROL;
+
+    // Inner <FormControl> children, in the order shipped extensions serialize them:
+    // Name → Type → FormControlExtension(nil) → DataField → DataSource → Label → [Items].
+    const inner = [
+      `\t\t\t\t<Name>${controlName}</Name>`,
+      `\t\t\t\t<Type>${typeValue}</Type>`,
+      `\t\t\t\t<FormControlExtension i:nil="true" />`,
+    ];
+    if (dataField) inner.push(`\t\t\t\t<DataField>${dataField}</DataField>`);
+    if (dataSource) inner.push(`\t\t\t\t<DataSource>${dataSource}</DataSource>`);
+    if (label) inner.push(`\t\t\t\t<Label>${label}</Label>`);
+    if (typeValue === 'ComboBox') inner.push(`\t\t\t\t<Items />`);
+
+    const newElement =
+      `\t\t<AxFormExtensionControl xmlns="">\n` +
+      `\t\t\t<Name>${formExtensionControlName()}</Name>\n` +
+      `\t\t\t<FormControl xmlns="" i:type="${iType}">\n` +
+      inner.join('\n') + '\n' +
+      `\t\t\t</FormControl>\n` +
+      `\t\t\t<Parent>${parentControl}</Parent>\n` +
+      `\t\t</AxFormExtensionControl>`;
+
+    let updated: string;
+    if (content.includes('<Controls />')) {
+      updated = content.replace('<Controls />', `<Controls>\n${newElement}\n\t</Controls>`);
+    } else if (content.includes('</Controls>')) {
+      updated = content.replace('</Controls>', `${newElement}\n\t</Controls>`);
+    } else {
+      return null; // no <Controls> collection — not a form-extension shape we recognise
+    }
+
+    if (updated === content) return null;
+
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
+    console.error(`[modify_d365fo_file] ✅ directXmlAddControl: added '${controlName}' (${iType}) to ${filePath}`);
+    return {
+      success: true,
+      message: `✅ Control '${controlName}' (${iType}) added to '${parentControl}' via direct XML fallback. File: ${filePath}`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlAddControl failed: ${err}`);
     return null;
   }
 }
@@ -1188,10 +1303,22 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'replace-all-fields': {
         if ((args as any).fields) {
+          const rawFields: any[] = (args as any).fields;
+          const resolvedFields = rawFields.map((f: any) => {
+            if (!f.type && f.edt) {
+              try {
+                const rdb = symbolIndex.getReadDb();
+                return { ...f, type: resolveEdtBaseTypeForField(f.edt, rdb) };
+              } catch {
+                return f;
+              }
+            }
+            return f;
+          });
           bridgeResult = await bridgeReplaceAllFields(
             context.bridge,
             objectName,
-            (args as any).fields,
+            resolvedFields,
           );
         }
         break;
@@ -1431,6 +1558,22 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             (args as any).controlDataField,
             (args as any).controlLabel,
           );
+          // Fallback: the bridge's AddControl resolves its target via _provider.Forms,
+          // which can never find a form EXTENSION (named "Base.Suffix") — it always
+          // reports 'Form "<ext>" not found', regardless of metadata-root freshness.
+          // For form extensions, write the control element straight into the XML.
+          if (objectType === 'form-extension' && (!bridgeResult || !bridgeResult.success)) {
+            const xmlFallbackResult = await directXmlAddControl(
+              actualFilePath,
+              (args as any).controlName,
+              (args as any).parentControl,
+              (args as any).controlType ?? 'String',
+              (args as any).controlDataSource,
+              (args as any).controlDataField,
+              (args as any).controlLabel,
+            );
+            if (xmlFallbackResult) bridgeResult = xmlFallbackResult;
+          }
         }
         break;
       }
@@ -1656,6 +1799,12 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
     }
 
+    // Advisory X++ select-statement lint on the source just written (add-method /
+    // replace-code etc.). Non-blocking: surfaces a likely "WHERE after join" mistake
+    // up front instead of letting it become a build error the agent hunts by hand.
+    const xppLintWarnings = lintXppSelect(args.sourceCode ?? (args as any).methodCode ?? args.newCode);
+    const xppLintNote = xppLintWarnings.length > 0 ? `\n\n${xppLintWarnings.join('\n\n')}` : '';
+
     return {
       content: [
         {
@@ -1663,7 +1812,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
           text:
             `✅ ${operation} on ${objectType} "${objectName}" — applied via IMetadataProvider.Update()\n\n` +
             `**File:** ${actualFilePath}${addControlNote}${generationNote}${bridgeValidation}${projectMessage}\n` +
-            `🔧 API: ${bridgeResult.message}\n\n` +
+            `🔧 API: ${bridgeResult.message}${xppLintNote}\n\n` +
             `**Next steps:**\n- Review changes in Visual Studio\n- Build the model to validate`,
         },
       ],
