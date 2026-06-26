@@ -11,6 +11,7 @@
  *   SEL003  crossCompany on joined buffer (must be on driving buffer)
  *   SEL004  Nested while select (N+1 query anti-pattern)
  *   SEL005  Function call in where clause (assign to variable first)
+ *   SEL006  `index hint …` — let the optimizer choose (legacy)
  *   COC001  Default param value copied into CoC wrapper signature
  *   COC002  [ExtensionOf] class not declared final
  *   COC003  [ExtensionOf] class name not ending _Extension
@@ -160,6 +161,26 @@ function checkForceLiterals(code: string): ValidationViolation[] {
     'error',
     'Remove forceLiterals. Use forcePlaceholders (default for non-join selects) or omit. ' +
     'forceLiterals exposes the query to SQL injection.',
+  );
+}
+
+/**
+ * SEL006 — `index hint …` ties a select to a specific physical index name.
+ * MS guidance: let the optimizer choose. The hint is silently ignored unless
+ * `buffer.allowIndexHint(true)` is called first, and it makes the query fragile
+ * across table rebuilds / model upgrades.
+ */
+function checkIndexHint(code: string): ValidationViolation[] {
+  return matchAll(
+    maskStringsAndComments(code),
+    /\bindex\s+hint\b/gi,
+    'SEL006',
+    'warning',
+    'Remove `index hint …` from the select. The D365FO optimizer picks the right index ' +
+    'in >99% of cases; `index hint` requires `buffer.allowIndexHint(true)` to take effect ' +
+    '(silently ignored otherwise) and ties the query to a physical index name that may ' +
+    'change after table rebuilds or model upgrades. Reach for it only when SQL-trace ' +
+    'evidence shows a measured plan regression.',
   );
 }
 
@@ -654,6 +675,7 @@ const XPP_RULES = [
   checkGenericDocComment,
   checkUnbalancedTts,
   checkDevArtifacts,
+  checkIndexHint,
 ];
 
 const XML_RULES = [

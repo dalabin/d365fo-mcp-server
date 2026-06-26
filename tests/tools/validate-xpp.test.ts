@@ -70,6 +70,59 @@ describe('SEL rules', () => {
     const result = await validateXppTool(req({ code, codeType: 'xpp' }));
     expect(getText(result)).toContain('SEL004');
   });
+
+  it('SEL006: flags `index hint …` (warning)', async () => {
+    const code = `
+      public static MpsValidationRule_BEC find(MpsValidationRuleId_BEC _ruleId, boolean _forUpdate = false)
+      {
+          MpsValidationRule_BEC rule;
+
+          if (_ruleId)
+          {
+              rule.selectForUpdate(_forUpdate);
+
+              select firstonly rule
+                  index hint Idx_Rule
+                  where rule.Rule == _ruleId;
+          }
+
+          return rule;
+      }
+    `;
+    const result = await validateXppTool(req({ code, codeType: 'xpp' }));
+    expect(getText(result)).toContain('SEL006');
+  });
+
+  it('SEL006: clean find method passes (no index hint)', async () => {
+    const code = `
+      public static MyTable find(MyTableId _myTableId, boolean _forUpdate = false)
+      {
+          MyTable local;
+
+          if (_myTableId)
+          {
+              local.selectForUpdate(_forUpdate);
+
+              select firstonly local
+                  where local.MyTableId == _myTableId;
+          }
+
+          return local;
+      }
+    `;
+    const result = await validateXppTool(req({ code, codeType: 'xpp' }));
+    expect(getText(result)).not.toContain('SEL006');
+  });
+
+  it('SEL006: does not fire on the literal text inside a string or comment', async () => {
+    // "index hint" inside a single-line comment should be masked out.
+    const code = `
+      // TODO: remove 'index hint MyIdx' once SQL trace shows the optimizer is happy
+      public void run() { }
+    `;
+    const result = await validateXppTool(req({ code, codeType: 'xpp' }));
+    expect(getText(result)).not.toContain('SEL006');
+  });
 });
 
 // ─── COC rules ───────────────────────────────────────────────────────────────

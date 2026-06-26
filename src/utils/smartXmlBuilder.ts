@@ -617,11 +617,16 @@ export class SmartXmlBuilder {
   }
 
   /**
-   * Generate primary key index for table
+   * Generate primary key index for table.
+   * Naming follows the Microsoft convention `<FieldName>Idx`
+   * (e.g. `AccountNumIdx`) or `<Field1>_<Field2>Idx` for composite keys.
    */
-  buildPrimaryKeyIndex(tableName: string, fields: string[]): TableIndexSpec {
+  buildPrimaryKeyIndex(_tableName: string, fields: string[]): TableIndexSpec {
+    const name = fields.length === 1
+      ? `${fields[0]}Idx`
+      : `${fields.join('_')}Idx`;
     return {
-      name: `${tableName}Idx`,
+      name,
       fields,
       unique: true,
       clustered: false,

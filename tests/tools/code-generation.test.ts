@@ -513,6 +513,115 @@ describe('generate_smart_table', () => {
     expect(count).toBeGreaterThanOrEqual(1); // original present
     expect(xml).toContain('AmountMST2');     // duplicate renamed
   });
+
+  // ── Issue 1: no implicit RecId index when no mandatory field is supplied
+  it('does NOT create an explicit RecId index when no mandatory field exists', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'MyNoPkTable',
+        modelName: 'MyModel',
+        fieldsHint: 'Description,Notes',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    // No RecId-only index should be auto-added — D365FO creates it implicitly.
+    expect(xml).not.toMatch(/<Name>RecIdIdx<\/Name>/);
+    expect(xml).not.toMatch(/<DataField>RecId<\/DataField>/);
+  });
+
+  it('DOES create a <FieldName>Idx index when a mandatory field is supplied', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'MyPkTable',
+        modelName: 'MyModel',
+        fieldsHint: 'AccountNum,Name',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    // Issue 2: index named after the field, not the table and not `Idx_<Field>`.
+    expect(xml).toContain('<Name>AccountNumIdx</Name>');
+    expect(xml).not.toContain('<Name>Idx_AccountNum</Name>');
+    expect(xml).not.toContain('<Name>MyPkTableIdx</Name>');
+    // <PrimaryIndex>/<ClusteredIndex> propagate the new name.
+    expect(xml).toContain('<PrimaryIndex>AccountNumIdx</PrimaryIndex>');
+    expect(xml).toContain('<ReplacementKey>AccountNumIdx</ReplacementKey>');
+  });
+
+  // ── Issue 3a: default methods = ['find', 'exist']
+  it('generates find+exist by default when `methods` is omitted', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'DefaultMethodsTable',
+        modelName: 'MyModel',
+        fieldsHint: 'AccountNum,Name',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    // find: takes the PK param, _forUpdate in PascalCase (table name may be prefixed)
+    expect(xml).toMatch(/public static DefaultMethodsTable\S* find\([^,]+ _accountNum, boolean _forUpdate = false\)/);
+    // exist: takes the PK param, returns boolean
+    expect(xml).toMatch(/public static boolean exist\([^,]+ _accountNum\)/);
+  });
+
+  it('generates nothing when `methods=[]` is passed', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'NoMethodsTable',
+        modelName: 'MyModel',
+        fieldsHint: 'AccountNum,Name',
+        methods: [],
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    expect(xml).not.toMatch(/public static .* find\(/);
+    expect(xml).not.toMatch(/public static boolean exist\(/);
+  });
+
+  it('honors an explicit methods=["exist"] override', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'OnlyExistTable',
+        modelName: 'MyModel',
+        fieldsHint: 'AccountNum,Name',
+        methods: ['exist'],
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    expect(xml).not.toMatch(/public static .* find\(/);
+    expect(xml).toMatch(/public static boolean exist\([^,]+ _accountNum\)/);
+  });
+
+  // ── Issue 3b + 4: find body aligns with modifyD365File (key-param guard, no hint)
+  it('emits find() with a key-param guard, _forUpdate PascalCase, and no index hint', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'GuardTable',
+        modelName: 'MyModel',
+        fieldsHint: 'AccountNum,Name',
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBeFalsy();
+    const xml = result?.content[0].text ?? '';
+    // Guard on the first key param, not on _forUpdate.
+    expect(xml).toContain('if (_accountNum)');
+    expect(xml).not.toContain('if (_forUpdate)');
+    // _forUpdate in PascalCase.
+    expect(xml).toContain('selectForUpdate(_forUpdate)');
+    expect(xml).not.toContain('selectForUpdate(_forupdate)');
+    // No index hint anywhere.
+    expect(xml).not.toMatch(/index\s+hint/i);
+  });
 });
 
 // ─── generate_smart_form ─────────────────────────────────────────────────────

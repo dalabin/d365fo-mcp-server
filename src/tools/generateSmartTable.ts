@@ -146,10 +146,10 @@ export const generateSmartTableTool: Tool = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'ALWAYS pass ["find", "exist"] when the user asks for those methods. ' +
-          'Methods are embedded directly in the generated XML. ' +
+          'Methods embedded into the generated XML. ' +
+          'Default: ["find", "exist"] when omitted. Pass [] to suppress. ' +
           'Supported values: "find", "exist". ' +
-          '⛔ NEVER omit this and then call d365fo_file(action="modify") to add methods afterwards — ' +
+          '⛔ NEVER call d365fo_file(action="modify") to add methods afterwards — ' +
           'd365fo_file(action="modify") CANNOT write files on Azure/Linux.',
       },
     },
@@ -486,12 +486,16 @@ export async function handleGenerateSmartTable(
       indexes.unshift(builder.buildPrimaryKeyIndex(name, primaryKeyFields));
       console.log(`[generateSmartTable] Added primary key index on [${primaryKeyFields.join(', ')}] (from primaryKeyFields)`);
     } else {
-      // Auto-detect: prefer first mandatory non-RecId field, fall back to RecId
-      const pkField = fields.find(f => f.mandatory && f.name !== 'RecId')?.name
-        ?? fields.find(f => f.name === 'RecId')?.name
-        ?? fields[0].name;
-      indexes.unshift(builder.buildPrimaryKeyIndex(name, [pkField]));
-      console.log(`[generateSmartTable] Added primary key index on ${pkField}`);
+      // Auto-detect: prefer the first mandatory non-RecId field.
+      // If none exists, do NOT create an explicit RecId index — D365FO auto-creates
+      // the RecId clustered index, and an explicit duplicate just adds noise to the AOT.
+      const pkField = fields.find(f => f.mandatory && f.name !== 'RecId')?.name;
+      if (pkField) {
+        indexes.unshift(builder.buildPrimaryKeyIndex(name, [pkField]));
+        console.log(`[generateSmartTable] Added primary key index on ${pkField}`);
+      } else {
+        console.log(`[generateSmartTable] No non-RecId mandatory field — skipping PK index (D365FO creates RecId clustered index automatically).`);
+      }
     }
   }
 
@@ -596,9 +600,13 @@ export async function handleGenerateSmartTable(
     console.log(`[generateSmartTable] Applied naming: ${name} → ${finalName}`);
   }
 
-  // Generate standard methods (find, exist) based on primary key fields
+  // Generate standard methods (find, exist) based on primary key fields.
+// Default = ['find', 'exist'] when caller omits `methods`; pass [] to suppress.
+  const effectiveMethods = requestedMethods !== undefined
+    ? requestedMethods
+    : ['find', 'exist'];
   const generatedMethods: Array<{ name: string; source: string }> = [];
-  if (requestedMethods && requestedMethods.length > 0) {
+  if (effectiveMethods.length > 0) {
     // Determine primary key fields from unique non-RecId index, or first non-RecId fields
     const uniqueIdx = indexes.find(idx => idx.unique && !idx.fields.every(f => f === 'RecId'));
     const pkFields = uniqueIdx
@@ -615,23 +623,31 @@ export async function handleGenerateSmartTable(
       .map(f => `${finalName}.${f} == _${f.charAt(0).toLowerCase() + f.slice(1)}`)
       .join('\n            && ');
 
-    for (const methodName of requestedMethods) {
+    const firstParamName = pkFields.length > 0
+      ? `_${pkFields[0].charAt(0).toLowerCase() + pkFields[0].slice(1)}`
+      : '';
+
+    for (const methodName of effectiveMethods) {
       if (methodName === 'find') {
         const params = buildParams(true);
+        // Aligned with modifyD365File.ts:2268-2291 — guard on the first key param
+        // (avoids unnecessary SQL on empty input), `_forUpdate` in PascalCase.
+        // No `index hint …` — the optimizer picks the right index in >99% of cases.
         generatedMethods.push({
           name: 'find',
           source: [
-            `public static ${finalName} find(${params}, boolean _forupdate = false)`,
+            `public static ${finalName} find(${params}, boolean _forUpdate = false)`,
             `{`,
             `    ${finalName}  local;`,
             ``,
-            `    if (_forupdate)`,
-            `    {`,
-            `        local.selectForUpdate(_forupdate);`,
-            `    }`,
+            firstParamName
+              ? `    if (${firstParamName})\n    {`
+              : `    {`,
+            `        local.selectForUpdate(_forUpdate);`,
             ``,
-            `    select firstOnly local`,
-            `        where ${whereClause};`,
+            `        select firstOnly local`,
+            `            where ${whereClause};`,
+            `    }`,
             ``,
             `    return local;`,
             `}`,
