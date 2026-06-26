@@ -184,6 +184,121 @@ describe('search_labels', () => {
     const result = await searchLabelsTool(req('search_labels', {}), ctx);
     expect(result.isError).toBe(true);
   });
+
+  // ── Fix A: FTS5 special characters are no longer stripped ────────────────
+  // "phrase" wrapping and "word*" prefix now survive the sanitizer.
+
+  it('passes matchType + description through to symbolIndex.searchLabels', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([makeLabelResult()]);
+    await searchLabelsTool(
+      req('search_labels', { query: 'Failed', matchType: 'prefix', description: 'empty' }),
+      ctx,
+    );
+    expect(ctx.symbolIndex.searchLabels as any).toHaveBeenCalledWith(
+      'Failed',
+      expect.objectContaining({ matchType: 'prefix', description: 'empty' }),
+    );
+  });
+
+  it('defaults matchType=fts5 and description=any when omitted (backward compat)', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([makeLabelResult()]);
+    await searchLabelsTool(req('search_labels', { query: 'Failed' }), ctx);
+    expect(ctx.symbolIndex.searchLabels as any).toHaveBeenCalledWith(
+      'Failed',
+      expect.objectContaining({ matchType: 'fts5', description: 'any' }),
+    );
+  });
+
+  // ── Output format: active filter chips ────────────────────────────────────
+
+  it('output shows non-default filters in the header', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ labelId: 'A', text: 'A' }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Failed', model: 'Foundation', description: 'empty', matchType: 'prefix' }),
+      ctx,
+    );
+    const text = result.content[0].text;
+    expect(text).toContain('model=Foundation');
+    expect(text).toContain('description=empty');
+    expect(text).toContain('matchType=prefix');
+  });
+
+  it('output omits filter chips when all are default', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ labelId: 'A', text: 'A' }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Failed' }),
+      ctx,
+    );
+    const text = result.content[0].text;
+    // No brackets, no filter chips
+    expect(text).toMatch(/matching "Failed":/);
+    expect(text).not.toMatch(/matching "Failed" \[/);
+  });
+
+  it('output includes language in filter chips when non-default', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ language: 'de' }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Kunde', language: 'de' }),
+      ctx,
+    );
+    expect(result.content[0].text).toContain('language=de');
+  });
+
+  // ── Hint: description="any" + comments present → suggest description="empty"
+
+  it('hints about description="empty" when current results have comments', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ comment: 'Long developer description here' }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Failed', description: 'any' }),
+      ctx,
+    );
+    const text = result.content[0].text;
+    expect(text).toContain('description="empty"');
+  });
+
+  it('does NOT hint description="empty" when description filter is already applied', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ comment: 'Long developer description here' }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Failed', description: 'empty' }),
+      ctx,
+    );
+    const text = result.content[0].text;
+    expect(text).not.toContain('description="empty"');
+  });
+
+  it('does NOT hint description="empty" when all results have empty comments', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ comment: '' }),
+      makeLabelResult({ comment: null }),
+    ]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'Failed', description: 'any' }),
+      ctx,
+    );
+    const text = result.content[0].text;
+    expect(text).not.toContain('description="empty"');
+  });
+
+  // ── Zero-results path also mentions the filter ────────────────────────────
+
+  it('zero-results message includes active description filter', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+    const result = await searchLabelsTool(
+      req('search_labels', { query: 'NoSuchLabel', description: 'empty' }),
+      ctx,
+    );
+    expect(result.content[0].text).toContain('description="empty"');
+  });
 });
 
 // ─── get_label_info ──────────────────────────────────────────────────────────

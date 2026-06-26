@@ -3207,7 +3207,14 @@ export class XppSymbolIndex {
    */
   searchLabels(
     query: string,
-    opts: { language?: string; model?: string; labelFileId?: string; limit?: number } = {},
+    opts: {
+      language?: string;
+      model?: string;
+      labelFileId?: string;
+      limit?: number;
+      matchType?: 'fts5' | 'substring' | 'prefix' | 'phrase';
+      description?: 'any' | 'empty' | 'present';
+    } = {},
   ): Array<{
     labelId: string;
     labelFileId: string;
@@ -3218,7 +3225,19 @@ export class XppSymbolIndex {
     filePath: string;
     rank: number;
   }> {
-    const { language = 'en-US', model, labelFileId, limit = 30 } = opts;
+    const {
+      language = 'en-US',
+      model,
+      labelFileId,
+      limit = 30,
+      matchType = 'fts5',
+      description = 'any',
+    } = opts;
+
+    // matchType='substring' bypasses FTS5 entirely — always uses LIKE.
+    if (matchType === 'substring') {
+      return this.searchLabelsLike(query, opts);
+    }
 
     // labels_fts only indexes en-US rows. For any other language, skip straight to
     // LIKE-based search — attempting FTS would always produce 0 results and then
@@ -3227,20 +3246,38 @@ export class XppSymbolIndex {
       return this.searchLabelsLike(query, opts);
     }
 
-    // Sanitize query for FTS5 (strip chars that would cause a syntax error)
-    const ftsQuery = query.replace(/['"*()]/g, ' ').trim();
+    // Sanitize the query. We strip only the single quote (the one character that
+    // reliably breaks FTS5 syntax) and keep the rest of FTS5 syntax — "*", "\"",
+    // "(", ")" are legitimate FTS5 operators (prefix match, phrase, grouping).
+    // Previously we stripped all of them, which silently disabled 80% of FTS5 power.
+    const sanitizedCore = query.replace(/[']/g, ' ').trim();
+
+    // Apply matchType transformations on top of the sanitized core.
+    let ftsQuery: string;
+    switch (matchType) {
+      case 'prefix':  ftsQuery = sanitizedCore + '*'; break;
+      case 'phrase':  ftsQuery = '"' + sanitizedCore + '"'; break;
+      case 'fts5':
+      default:        ftsQuery = sanitizedCore; break;
+    }
+
     // Route to LIKE when FTS5 would silently return 0 results:
     // • '_' and '%' — word separators in the unicode61 tokenizer (also LIKE wildcards);
     //   literal underscore/percent searches must go through LIKE with proper escaping.
     // • Any query whose alphanumeric content disappears after sanitization (e.g. '-',
     //   '.', '@', ':', '@SYS:') produces zero FTS5 tokens and no exception to trigger
     //   the catch-based fallback below.
-    if (/[_%]/.test(query) || !/[a-zA-Z0-9]/.test(ftsQuery)) {
+    if (/[_%]/.test(query) || !/[a-zA-Z0-9]/.test(sanitizedCore)) {
       return this.searchLabelsLike(query, opts);
     }
 
-    // Cache statement keyed by which optional filters are active (4 variants)
-    const stmtKey = `searchLabels_${model ? 'model' : 'nomodel'}_${labelFileId ? 'lfid' : 'nolfid'}`;
+    // Cache statement keyed by which optional filters are active.
+    // Variants: 4 (model × labelFileId) × 2 (description empty/present/no-filter) = up to 12.
+    const stmtKey =
+      `searchLabels_${matchType}_` +
+      `${model ? 'm' : '_'}_` +
+      `${labelFileId ? 'l' : '_'}_` +
+      description;
     let stmt = this.labelsStmtCache.get(stmtKey);
     if (!stmt) {
       let sql = `
@@ -3251,6 +3288,10 @@ export class XppSymbolIndex {
         WHERE labels_fts MATCH ?`;
       if (model)       sql += `\n          AND l.model = ?`;
       if (labelFileId) sql += `\n          AND l.label_file_id = ?`;
+      if (description === 'empty')
+                       sql += `\n          AND (l.comment IS NULL OR TRIM(l.comment) = '')`;
+      if (description === 'present')
+                       sql += `\n          AND l.comment IS NOT NULL AND TRIM(l.comment) != ''`;
       sql += `\n          ORDER BY f.rank\n          LIMIT ?`;
       stmt = this.labelsDb.prepare(sql);
       this.labelsStmtCache.set(stmtKey, stmt);
@@ -3270,19 +3311,37 @@ export class XppSymbolIndex {
   }
 
   /**
-   * LIKE-based fallback label search (for queries with special characters)
+   * LIKE-based fallback label search (for queries with special characters,
+   * non-en-US languages, or matchType='substring')
    */
   private searchLabelsLike(
     query: string,
-    opts: { language?: string; model?: string; labelFileId?: string; limit?: number } = {},
+    opts: {
+      language?: string;
+      model?: string;
+      labelFileId?: string;
+      limit?: number;
+      matchType?: 'fts5' | 'substring' | 'prefix' | 'phrase';
+      description?: 'any' | 'empty' | 'present';
+    } = {},
   ): any[] {
-    const { language = 'en-US', model, labelFileId, limit = 30 } = opts;
+    const {
+      language = 'en-US',
+      model,
+      labelFileId,
+      limit = 30,
+      description = 'any',
+    } = opts;
     // Escape LIKE special characters so the query is treated as a literal substring.
     // '\' is the escape character declared in the SQL ESCAPE clause below.
     const escaped = query.replace(/[\\%_]/g, '\\$&');
     const pattern = `%${escaped}%`;
 
-    const stmtKey = `searchLabelsLike_${model ? 'model' : 'nomodel'}_${labelFileId ? 'lfid' : 'nolfid'}`;
+    const stmtKey =
+      `searchLabelsLike_` +
+      `${model ? 'm' : '_'}_` +
+      `${labelFileId ? 'l' : '_'}_` +
+      description;
     let stmt = this.labelsStmtCache.get(stmtKey);
     if (!stmt) {
       let sql = `
@@ -3292,6 +3351,10 @@ export class XppSymbolIndex {
           AND LOWER(language) = LOWER(?)`;
       if (model)       sql += `\n          AND model = ?`;
       if (labelFileId) sql += `\n          AND label_file_id = ?`;
+      if (description === 'empty')
+                       sql += `\n          AND (comment IS NULL OR TRIM(comment) = '')`;
+      if (description === 'present')
+                       sql += `\n          AND comment IS NOT NULL AND TRIM(comment) != ''`;
       sql += `\n        LIMIT ?`;
       stmt = this.labelsDb.prepare(sql);
       this.labelsStmtCache.set(stmtKey, stmt);
